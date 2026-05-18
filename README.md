@@ -4,6 +4,5 @@ A collection of notes on various topics related to software engineering.
 
 
 ## Topics
-- Golang
+- Programming Languages: C, Golang, Rust
 - Networking Fundamentals
-- Rust
