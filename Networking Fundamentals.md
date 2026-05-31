@@ -140,12 +140,12 @@ An HTTP GET request traveling down the stack. Each layer treats everything above
 
 - Each layer only reads its own header. A router (L3 device) strips the frame header, reads the IP header, makes a routing decision, and re-encapsulates in a new frame for the next hop.
 - Headers are added at the front (**headers**), trailers at the end (**trailers**). The CRC (Cyclic Redundancy Check) in Ethernet is a trailer. Most layers only add headers.
-- This is exactly what you see in Wireshark — nested layers that you can expand one by one.
-- The total overhead of all headers is why your 1500-byte Ethernet MTU only carries ~1460 bytes of TCP payload: 20 bytes eaten by IP, 20 by TCP.
+- This is exactly what Wireshark displays — nested layers that can be expanded one by one.
+- The total overhead of all headers is why a 1500-byte Ethernet MTU carries only ~1460 bytes of TCP payload: 20 bytes consumed by IP, 20 by TCP.
 
 ### What happens when you type a URL
 
-The most common networking interview question. Here's the full story, layer by layer:
+The most common networking interview question. The full sequence, layer by layer:
 
 ```
   Browser                                              Server
@@ -170,13 +170,13 @@ The most common networking interview question. Here's the full story, layer by l
     |    6. Render page                                  |
 ```
 
-> **Interview tip:** structure your answer through the layers — DNS resolution, TCP handshake, TLS handshake, HTTP request, response parsing. Mentioning ARP, routing, and frame-level delivery earns extra points.
+> **Interview tip:** structure the answer through the layers — DNS resolution, TCP handshake, TLS handshake, HTTP request, response parsing. Mentioning ARP, routing, and frame-level delivery demonstrates additional depth.
 
 ---
 
 ## 2. Layer 1 — Physical
 
-The physical layer handles transmission of raw bits over a medium: copper (Ethernet cables), fiber optics, or radio (WiFi, cellular). As a software engineer, you rarely interact with this layer directly, but a few things matter:
+The physical layer handles transmission of raw bits over a medium: copper (Ethernet cables), fiber optics, or radio (WiFi, cellular). Software engineers rarely interact with this layer directly, but a few aspects matter:
 
 **What to know:**
 - **Ethernet cable categories:** Cat5e (1 Gbps), Cat6 (10 Gbps short range), Cat6a (10 Gbps longer range). Datacenter interconnects use fiber.
@@ -232,7 +232,7 @@ Resolves IP addresses to MAC addresses within a LAN. Operates with broadcast req
     |  (A caches: 10.0.0.5 -> aa:bb:cc:dd:ee:ff)      |
 ```
 
-For off-subnet destinations, the frame goes to the **default gateway's MAC**. The router then does ARP on the next segment. This is why `arp -a` on your machine shows your gateway's MAC but not the MAC of remote servers.
+For off-subnet destinations, the frame goes to the **default gateway's MAC**. The router then performs ARP on the next segment. This is why `arp -a` on the local machine shows the gateway's MAC but not the MAC of remote servers.
 
 > **Security:** ARP has zero authentication. Any host can claim any IP, enabling man-in-the-middle attacks on the LAN (ARP spoofing). Mitigations: DAI (Dynamic ARP Inspection), 802.1X port authentication, static ARP entries.
 
@@ -349,7 +349,7 @@ CIDR replaced the old Class A/B/C system. Addresses are `IP/prefix_length`, allo
 |`/16`|255.255.0.0|65,536|65,534|Large VPC|
 |`/8`|255.0.0.0|16.7M|16.7M|Private class A|
 
-**VLSM (Variable Length Subnet Masking)** lets you use different prefix lengths within the same allocation — standard practice:
+**VLSM (Variable Length Subnet Masking)** allows different prefix lengths within the same allocation — standard practice:
 ```
   10.0.0.0/16 (entire allocation)
   +-- 10.0.0.0/20   -- Production servers    (4094 hosts)
@@ -730,10 +730,10 @@ This is how a web server handles thousands of connections on port 443 — each c
 
 #### Practical socket concepts
 
-- **Backlog queue:** `listen(fd, backlog)` sets how many pending connections the OS will queue before refusing new ones. If your server is slow to `accept()`, clients get connection refused when the backlog fills.
-- **`SO_REUSEADDR`:** allows binding to an address that's in TIME_WAIT. Essential for servers that restart frequently — without it, you get "address already in use" errors.
+- **Backlog queue:** `listen(fd, backlog)` sets how many pending connections the OS will queue before refusing new ones. If the server is slow to `accept()`, clients are refused connections once the backlog fills.
+- **`SO_REUSEADDR`:** allows binding to an address that is in TIME_WAIT. Essential for servers that restart frequently — without it, "address already in use" errors occur.
 - **`SO_REUSEPORT`:** allows multiple sockets to bind to the same address/port. The kernel distributes incoming connections across them. Used for multi-process/multi-thread server architectures (Nginx, Go).
-- **Non-blocking I/O and multiplexing:** production servers don't use one thread per connection. They use `epoll` (Linux), `kqueue` (macOS/BSD), or `io_uring` (modern Linux) to handle thousands of connections in one thread via event loops. This is what Node.js, Nginx, and Go's runtime use under the hood.
+- **Non-blocking I/O and multiplexing:** production servers do not use one thread per connection. They use `epoll` (Linux), `kqueue` (macOS/BSD), or `io_uring` (modern Linux) to handle thousands of connections in one thread via event loops. This is the mechanism underlying Node.js, Nginx, and Go's runtime.
 - **`TCP_NODELAY`:** disables Nagle's algorithm, which batches small writes into larger segments. For latency-sensitive applications (real-time, interactive), enable `TCP_NODELAY` to send data immediately.
 - **Keep-alive:** `SO_KEEPALIVE` sends periodic probes on idle connections to detect dead peers. Configurable timers: how long before first probe, interval between probes, how many probes before giving up.
 
@@ -926,7 +926,7 @@ Key advantages over TCP+TLS:
 
 ## 6. Layer 5/6/7 — Session, Presentation, Application
 
-In the TCP/IP model these are merged into the Application layer. This is where you spend most of your time as a software engineer.
+In the TCP/IP model these are merged into the Application layer. This is where most application development occurs.
 
 ### HTTP
 
@@ -960,7 +960,7 @@ The protocol of the web and the dominant API transport.
 
 ### TLS (Transport Layer Security) — Deep Dive
 
-TLS encrypts the communication channel between two parties, providing three guarantees: **confidentiality** (nobody can read the data), **integrity** (nobody can modify the data undetected), and **authentication** (you're talking to who you think you are).
+TLS encrypts the communication channel between two parties, providing three guarantees: **confidentiality** (the data cannot be read by third parties), **integrity** (the data cannot be modified undetected), and **authentication** (the remote party is who it claims to be).
 
 #### TLS versions
 
@@ -1009,10 +1009,10 @@ TLS encrypts the communication channel between two parties, providing three guar
 
 #### TLS for engineers — practical knowledge
 
-- **TLS termination:** where TLS gets decrypted. Could be at the load balancer (AWS ALB, Nginx), a reverse proxy, or the application itself. Traffic between the termination point and your backend may be unencrypted.
+- **TLS termination:** where TLS is decrypted. May be at the load balancer (AWS ALB, Nginx), a reverse proxy, or the application itself. Traffic between the termination point and the backend may be unencrypted.
 - **mTLS (mutual TLS):** both sides present certificates. The server verifies the client's certificate too. Standard in service mesh (Istio, Linkerd) and zero-trust architectures. Used to authenticate service-to-service communication.
 - **Certificate pinning:** the client only trusts specific certificates (not any CA-signed cert). Used in mobile apps for extra security. Makes rotation harder — use with care.
-- **Certificate transparency (CT):** public logs of all issued certificates. Lets you detect unauthorized certificates for your domain.
+- **Certificate transparency (CT):** public logs of all issued certificates. Enables detection of unauthorized certificates issued for a domain.
 - **SNI (Server Name Indication):** TLS extension where the client specifies which hostname it's connecting to. Required for virtual hosting (multiple HTTPS sites on one IP). Sent in plaintext in TLS 1.2 — encrypted in TLS 1.3 via ECH (Encrypted Client Hello).
 - **HSTS (HTTP Strict Transport Security):** response header telling browsers to always use HTTPS for the domain. Prevents SSL-stripping MITM attacks.
 
@@ -1232,7 +1232,7 @@ gRPC is a **high-performance RPC framework** developed by Google. It uses:
 - **Protocol Buffers (Protobuf)** for serialization
 - **generated client/server code**
 
-Instead of designing REST endpoints, you define **methods in a service interface**.
+Instead of designing REST endpoints, **methods are defined in a service interface**.
 
 #### Basic gRPC Service Definition
 
@@ -1571,7 +1571,7 @@ Most consumer and cloud NAT is **PAT** (also called "NAT overload" or "NAPT").
 - **UDP mapping timeout:** NAT entries for UDP expire fast (~30 seconds). Long-lived UDP flows (VoIP, gaming, VPN) need periodic keepalive packets.
 - **TCP mapping timeout:** longer (~minutes), but idle connections can still be dropped. TCP keepalive helps.
 - **Protocols with embedded IPs:** SIP, FTP active mode, and some gaming protocols embed IP addresses in the payload. NAT doesn't rewrite payloads, so these break without an ALG (Application Level Gateway).
-- **Cloud NAT layers:** in AWS/GCP/Azure, you often have: instance private IP -> VPC subnet -> NAT gateway -> public IP. Each layer has its own mapping table and timeouts.
+- **Cloud NAT layers:** in AWS/GCP/Azure, the path is often: instance private IP -> VPC subnet -> NAT gateway -> public IP. Each layer has its own mapping table and timeouts.
 - **Port exhaustion:** 16-bit port field = ~65K mappings per public IP. High-traffic NAT gateways can exhaust this, causing connection failures. Solution: add more public IPs.
 - **Hairpin NAT:** when a host behind NAT tries to access another host behind the same NAT using the public IP. Not all NAT implementations support this — can cause confusing connectivity issues.
 
@@ -1597,7 +1597,7 @@ DNS translates human-readable names (example.com) to IP addresses (93.184.216.34
 
 #### DNS Resolution Process
 
-**Stub resolver** (on your machine) → **Recursive resolver** (ISP or 8.8.8.8) → **Root servers** → **TLD servers** → **Authoritative nameservers**
+**Stub resolver** (on the local host) → **Recursive resolver** (ISP or 8.8.8.8) → **Root servers** → **TLD servers** → **Authoritative nameservers**
 
 ```
   Your app              Recursive Resolver        Root       .com TLD      Authoritative
@@ -1704,7 +1704,7 @@ $ dig -x 93.184.216.34
 ```
 **Solution:** Use A/AAAA records at apex, or services like Cloudflare's "CNAME flattening" or AWS Route 53's Alias records.
 
-**Long TTLs during migrations:** If you set TTL = 86400 (24h), DNS changes take a full day to propagate. Before migrations:
+**Long TTLs during migrations:** With TTL = 86400 (24h), DNS changes take a full day to propagate. Before migrations:
 1. Lower TTL to 60-300s a day in advance.
 2. Make the change.
 3. Wait for old TTL to expire.
@@ -1733,7 +1733,7 @@ Used for internal services, cloud VPCs, CDNs (geo-based routing).
 - Traditional DNS queries are **plaintext UDP/53** — ISPs can see and intercept.
 - **DoT (port 853):** Encrypted DNS over TLS.
 - **DoH (HTTPS):** Encrypted DNS over HTTPS (looks like web traffic).
-- Privacy benefit: ISP can't see what domains you look up.
+- Privacy benefit: the ISP cannot see which domains are resolved.
 - Supported by browsers (Firefox, Chrome) and resolvers (Cloudflare, Google).
 
 #### Linux DNS Commands
@@ -1860,7 +1860,7 @@ Eight false assumptions developers make:
 7. Transport cost is zero.
 8. The network is homogeneous.
 
-Every one will bite you in production. Design for failure: retries with exponential backoff, circuit breakers, idempotent operations.
+Every one of these fails in production. Design for failure: retries with exponential backoff, circuit breakers, idempotent operations.
 
 ---
 

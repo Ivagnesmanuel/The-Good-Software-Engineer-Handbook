@@ -119,7 +119,7 @@ let b = a; // copy, both valid
 
 ### Borrowing
 
-Instead of transferring ownership, you can lend a reference to a value.
+Instead of transferring ownership, a reference to a value can be lent.
 
 ```rust
 // Immutable borrow (&T) -- unlimited simultaneous borrows allowed
@@ -368,7 +368,7 @@ let is_small = matches!(value, 0..=10);
 
 ## Generics
 
-Generics let you write code that works across multiple types without duplication. The compiler generates concrete implementations for each type used (monomorphization), so there is no runtime cost.
+Generics allow code that works across multiple types without duplication. The compiler generates concrete implementations for each type used (monomorphization), so there is no runtime cost.
 
 ```rust
 // Generic function
@@ -467,7 +467,7 @@ fn make_summary() -> impl Summary { }
 
 ### Trait Objects and `dyn`
 
-When you need different concrete types behind the same interface at runtime, use trait objects. The `dyn` keyword marks dynamic dispatch: method calls go through a vtable (a lookup table of function pointers) instead of being resolved at compile time.
+When different concrete types are needed behind the same interface at runtime, use trait objects. The `dyn` keyword marks dynamic dispatch: method calls go through a vtable (a lookup table of function pointers) instead of being resolved at compile time.
 
 ```rust
 // &dyn Trait or Box<dyn Trait>
@@ -511,7 +511,7 @@ struct Point {
 
 ## Option and Result
 
-`Option` and `Result` are enums at the core of Rust's approach to nullable values and error handling. They force you to handle the absent/error case explicitly.
+`Option` and `Result` are enums at the core of Rust's approach to nullable values and error handling. They force the absent/error case to be handled explicitly.
 
 ```rust
 // Option<T> = Some(T) | None
@@ -1102,7 +1102,7 @@ let lock = RwLock::new(5);
 
 ## Async/Await
 
-Rust's async model is based on futures (lazy, poll-based). The language provides `async`/`await` syntax, but you need an executor (runtime) to drive futures to completion. Tokio is the most widely used runtime.
+Rust's async model is based on futures (lazy, poll-based). The language provides `async`/`await` syntax, but an executor (runtime) is required to drive futures to completion. Tokio is the most widely used runtime.
 
 ### Basics
 
@@ -1264,7 +1264,7 @@ while let Some(value) = s.next().await {
 
 ## Unsafe Rust
 
-Unsafe Rust lets you opt out of certain compiler guarantees. An `unsafe` block tells the compiler "I have manually verified these invariants." The five things you can only do in unsafe code:
+Unsafe Rust allows opting out of certain compiler guarantees. An `unsafe` block asserts to the compiler that the relevant invariants have been manually verified. The five operations permitted only in unsafe code:
 
 1. Dereference raw pointers
 2. Call unsafe functions
@@ -1599,7 +1599,7 @@ path = "examples/demo.rs"
 
 ### Workspaces
 
-Workspaces let you manage multiple related crates in a single repository. They share a single `Cargo.lock` and output directory (`target/`), which speeds up builds and keeps dependency versions consistent.
+Workspaces manage multiple related crates in a single repository. They share a single `Cargo.lock` and output directory (`target/`), which speeds up builds and keeps dependency versions consistent.
 
 ```toml
 # Root Cargo.toml

@@ -1,6 +1,6 @@
 ## Linux Networking Commands Reference
 
-Organized by layer and use case. Commands you'll actually use for debugging.
+Organized by layer and use case. Commands used in practice for debugging.
 
 ---
 
