@@ -59,7 +59,7 @@ An OS is a layer between hardware and user programs that provides four primary a
 | Process | The CPU | Each process believes it has the CPU to itself |
 | Virtual address space | RAM | Each process has its own private memory map |
 | File | Disk + devices | Uniform I/O API for storage, sockets, pipes |
-| Threads / scheduler | Multiple CPUs | Concurrent execution within a process |
+| Threads / scheduler | Concurrency | Multiple independent execution streams, multiplexed onto however many cores exist |
 
 Programs interact with the kernel through **system calls** — controlled entries into kernel-mode code, the only legitimate way to access hardware or shared resources.
 
@@ -177,7 +177,7 @@ Linux process states (from `ps`):
 
 **Zombies** exist because the OS retains a process's exit status until its parent retrieves it via `wait()`. A zombie consumes a process slot. Long-lived zombie processes indicate a bug in the parent (not calling wait()).
 
-**Orphans** are processes whose parent died. They get adopted by PID 1 (init/systemd) which periodically reaps them.
+**Orphans** are processes whose parent died. They get adopted by PID 1 (init/systemd), which reaps each one as it exits (the orphan's termination delivers SIGCHLD to init, which calls `wait()`).
 
 ### Process Groups, Sessions, Jobs
 
@@ -272,7 +272,7 @@ Detailed treatment of memory models, lock-free algorithms, and the actual hazard
 
 ### Thread Pools
 
-Creating a thread per task is wasteful (each thread costs ~8 MB stack by default). A thread pool maintains N worker threads that pull tasks from a queue.
+Creating a thread per task is wasteful (each thread reserves ~8 MB of address space for its stack by default, committed lazily, so the resident cost is far smaller). A thread pool maintains N worker threads that pull tasks from a queue.
 
 ```
 Tasks ----> Queue ----> Worker 1
@@ -303,7 +303,7 @@ This is the default scheduler for ordinary Linux processes. The goal in one sent
 
 **The core idea: virtual runtime (`vruntime`).** Each thread has a counter, `vruntime`, that measures *how much CPU time it has already received*. While a thread runs, its `vruntime` increases; while it waits, its `vruntime` stays still. The scheduler's rule is simple:
 
-> Always run the thread with the **lowest** `vruntime` (the one that has had the *least* CPU so far). When another thread's `vruntime` falls below the running one's, switch to it.
+> Always run the thread with the **lowest** `vruntime` (the one that has had the *least* CPU so far). When another thread's `vruntime` falls below the running one's, switch to it (in practice CFS checks at scheduling points and enforces a minimum granularity, so it does not switch on every infinitesimal crossing).
 
 This naturally equalizes CPU over time — whoever is "behind" gets to run until it catches up, then yields to whoever is now behind. "Fair" falls out of "always serve the most-starved."
 
@@ -339,6 +339,8 @@ For tasks with hard deadlines (audio, robotics, networking). Two policies:
 
 Real-time tasks preempt all SCHED_OTHER tasks. Misusing them can starve the rest of the system.
 
+Fixed-priority policies are where **priority inversion** bites: a high-priority task blocked on a lock held by a low-priority task that a medium-priority task keeps preempting, so the high-priority task waits on the medium one indirectly. RT mutexes bound it with priority inheritance — see `Concurrency.md`.
+
 ### Priorities (Nice / Niceness)
 
 Niceness ranges from -20 (highest priority) to +19 (lowest). Default 0. A higher nice value means "nicer to others" (lower priority). `nice` and `renice` set it.
@@ -351,7 +353,7 @@ Bind a thread to specific CPUs. Avoids cache-cold migrations between cores.
 taskset -c 0-3 ./my-program   # restrict to CPUs 0-3
 ```
 
-Most workloads don't need explicit affinity — CFS does a reasonable job of keeping tasks where their cache is warm. Real-time or HPC workloads pin manually.
+Most workloads don't need explicit affinity — CFS does a reasonable job of keeping tasks where their cache is warm. Real-time or HPC (high-performance computing) workloads pin manually.
 
 ### Context Switching
 
@@ -383,7 +385,7 @@ Context switches happen on:
 
 ### NUMA (Non-Uniform Memory Access)
 
-On multi-socket systems, each CPU socket has its own memory bank. Local access is fast; remote (cross-socket) access is slower.
+On multi-socket systems, each CPU socket has its own memory bank. Local access is fast; remote (cross-socket) access is slower, traversing an inter-socket interconnect — Intel's QuickPath/Ultra Path Interconnect (QPI/UPI), AMD's Infinity Fabric.
 
 ```
 +------+    +------+
@@ -394,8 +396,8 @@ On multi-socket systems, each CPU socket has its own memory bank. Local access i
 | RAM0 |    | RAM1 |
 +------+    +------+
 
-CPU0 -> RAM0:  ~100 ns
-CPU0 -> RAM1:  ~150 ns (50% slower)
+CPU0 -> RAM0:  local   (baseline)
+CPU0 -> RAM1:  remote  (illustratively ~1.5x the local latency)
 ```
 
 NUMA-aware code:
@@ -414,7 +416,7 @@ For low-latency systems (high-frequency trading, real-time audio, kernel bypass 
 - Disable CPU frequency scaling (constant clock).
 - Disable hyperthreading on dedicated cores.
 - Run with `SCHED_FIFO` or `SCHED_RR`.
-- Avoid syscalls in the hot path (DPDK, io_uring).
+- Avoid syscalls in the hot path (kernel-bypass frameworks like DPDK, the Data Plane Development Kit, or batched-submission interfaces like io_uring).
 
 ---
 
@@ -461,7 +463,7 @@ Virtual page 3  -> Physical frame 9
 
 Each process has its own page table, which is why each sees a different physical reality for the same virtual address. A context switch to a different process loads that process's page table (by pointing the CPU's page-table base register at it).
 
-**Why the table is multi-level (hierarchical).** A 48-bit address space holds 2^36 pages. A flat table with one entry per page would be enormous — gigabytes of table per process — and almost entirely empty, because a process uses only a tiny scattered fraction of its address space. The fix: a **tree of tables**. Upper levels exist only for the regions actually in use; unused branches are simply absent. x86-64 uses 4 levels (named PML4 → PDPT → PD → PT). The 48-bit address is sliced into four 9-bit indices (one per level) plus a 12-bit offset:
+**Why the table is multi-level (hierarchical).** A 48-bit address space holds 2^36 pages. A flat table with one entry per page would be enormous — at 8 bytes per entry, 2^36 × 8 B = 512 GB of table per process — and almost entirely empty, because a process uses only a tiny scattered fraction of its address space. The fix: a **tree of tables**. Upper levels exist only for the regions actually in use; unused branches are simply absent. x86-64 uses 4 levels (named PML4 → PDPT → PD → PT); the LA57 extension adds a fifth (PML5) to widen the virtual address to 57 bits where the hardware and kernel support it. The 48-bit address is sliced into four 9-bit indices (one per level) plus a 12-bit offset:
 
 ```
 Virtual address (48 bits), sliced into table indices:
@@ -510,7 +512,7 @@ A TLB hit makes translation essentially free; a TLB miss costs a full page-table
 
 A **page fault** is what happens when the MMU tries to translate a virtual address and the page table says the page isn't currently mapped to a frame (or is mapped but with the wrong permissions). The CPU can't proceed, so it **traps into the kernel** to sort it out. Crucially, "page fault" is not always an error — it's often the normal mechanism by which memory gets loaded lazily.
 
-**Minor (soft) fault — cheap, common, not an error.** The data is already in physical RAM, it just isn't mapped into *this* process's page table yet. The kernel only has to add the page-table entry. Examples: a shared library already in RAM for another process (just point this process's table at the same frames — COW), or the first touch of freshly-allocated memory the kernel can satisfy from a zeroed page. Microseconds.
+**Minor (soft) fault — cheap, common, not an error.** The data is already in physical RAM, it just isn't mapped into *this* process's page table yet. The kernel only has to add the page-table entry. Examples: a shared library already in RAM for another process (just point this process's table at the same frames — read-only code is simply shared, not copied), or the first touch of freshly-allocated memory the kernel can satisfy from a zeroed page. Microseconds.
 
 **Major (hard) fault — expensive.** The data isn't in RAM at all; it must be fetched from disk. Examples: the page was swapped out, or it's part of a memory-mapped file not yet read in. The kernel issues disk I/O and blocks the thread until it completes. **Milliseconds** — thousands of times slower than a minor fault. A process taking many major faults per second is thrashing; that's the symptom of "working set doesn't fit in RAM."
 
@@ -584,7 +586,7 @@ close(fd);
 - Multiple processes can map the same file and share physical pages.
 - Suitable for large files where loading all at once is wasteful.
 
-**Used by:** databases (LMDB, SQLite's WAL), search engines (Lucene), zero-copy I/O paths, dynamic linker (loads .so files via mmap).
+**Used by:** databases (LMDB, SQLite's WAL — write-ahead log), search engines (Lucene), zero-copy I/O paths, dynamic linker (loads .so files via mmap).
 
 **Anonymous mmap** (no backing file) is how large allocations bypass the heap. `malloc()` for large sizes uses mmap rather than `brk()` so memory can be returned to the OS on free.
 
@@ -605,7 +607,7 @@ When the kernel runs out of memory and cannot reclaim, it selects a process to k
 | Symptom | Likely cause |
 |---------|--------------|
 | Process grows over time | Memory leak |
-| `RSS` much smaller than `VSZ` | Lots of mapped but untouched memory (normal) |
+| `RSS` (resident set size, actual physical RAM) much smaller than `VSZ` (virtual size, total mapped) | Lots of mapped but untouched memory (normal) |
 | Heavy swap I/O | Working set exceeds RAM |
 | Sudden OOM kill | Allocation spike or another process consuming memory |
 | High `Major page faults/sec` | Working set doesn't fit in RAM; paging from disk |
@@ -629,8 +631,8 @@ Application calls read(fd, buf, size):
 Application calls write(fd, buf, size):
   1. Kernel writes to page cache (dirty page).
   2. Marks pages dirty. Returns to application.
-  3. Background flusher (pdflush / writeback) flushes dirty pages to disk
-     periodically and under memory pressure.
+  3. Background writeback (per-device flusher threads) flushes dirty pages to
+     disk periodically and under memory pressure.
 ```
 
 The page cache uses all available free RAM. `free -h` reports it as "buff/cache" separately from "used."
@@ -826,7 +828,7 @@ Examples of avoiding syscall overhead:
 - `io_uring` to submit many operations with few syscalls.
 - `sendfile()` to copy file contents to a socket without userspace involvement.
 - `mmap()` to read a file without read() calls.
-- `vDSO`: the kernel exports some functions (like `gettimeofday`) as ordinary user calls, no syscall needed.
+- `vDSO` (virtual dynamic shared object): the kernel exports some functions (like `gettimeofday`) as ordinary user calls, no syscall needed.
 
 ### strace and ltrace
 
@@ -854,6 +856,30 @@ if (fd < 0) {
 ```
 
 Common errnos: ENOENT (not found), EACCES (permission denied), EAGAIN (would block), EINTR (interrupted by signal), ENOMEM, EBADF (bad fd), EPIPE (write to closed pipe).
+
+### Traps and Interrupts
+
+There are two ways a core leaves user code and enters the kernel, distinguished by cause. A **trap** is synchronous — caused by the instruction currently executing (a syscall, a page fault, a divide-by-zero); it always occurs at a precise instruction boundary. An **interrupt** is asynchronous — caused by a hardware device or another CPU, unrelated to whatever instruction was running (a packet arrives, a disk transfer completes, a timer expires).
+
+Because an interrupt handler runs in the middle of arbitrary code, and the device may be time-critical (an arriving packet must be drained before the NIC buffer overflows), Linux splits the work:
+
+- **Top half (hard IRQ):** runs immediately, briefly, with interrupts disabled. Does the minimum — acknowledge the device, copy out urgent data, schedule the rest.
+- **Bottom half (softirq / tasklet / threaded IRQ):** the deferrable work — protocol processing, waking the blocked thread — runs afterward with interrupts re-enabled, so it cannot stall further interrupts.
+
+```
+device finishes I/O
+      |  raises IRQ
+      v
+top half (hard IRQ)   -- ack device, minimal work, schedule bottom half
+      |
+      v
+bottom half (softirq) -- finish processing, mark page/socket ready,
+      |                  wake the thread blocked in read()/epoll_wait()
+      v
+scheduler runs the now-runnable thread
+```
+
+This is the other side of "a thread blocks on I/O" (section 4): the wakeup that ends the block is delivered by the device's interrupt. The periodic **timer interrupt** is the same mechanism applied to a clock — it is what lets a preemptive scheduler reclaim a CPU from a thread that never yields; without it, scheduling would be cooperative.
 
 ---
 
@@ -898,7 +924,7 @@ Fastest IPC (just memory). Requires synchronization (mutexes, semaphores) to coo
 
 ### Message Queues, Semaphores
 
-POSIX and SysV provide named message queues and semaphores. Less common in modern code — most apps use sockets or shared memory + futexes.
+POSIX and SysV provide named message queues and semaphores. Less common in modern code — most apps use sockets or shared memory + futexes (fast userspace mutexes).
 
 ### Choosing IPC
 
@@ -921,6 +947,7 @@ Asynchronous notifications delivered to a process. The kernel or another process
 
 | Signal | Default | Meaning |
 |--------|---------|---------|
+| SIGHUP (1) | Terminate | Hangup; conventionally "reload config" |
 | SIGINT (2) | Terminate | Interrupt (Ctrl+C) |
 | SIGQUIT (3) | Core dump | Quit + core (Ctrl+\ ) |
 | SIGILL (4) | Core dump | Illegal instruction |
@@ -936,7 +963,6 @@ Asynchronous notifications delivered to a process. The kernel or another process
 | SIGSTOP (19) | Stop | Cannot be caught or ignored |
 | SIGTSTP (20) | Stop | Terminal stop (Ctrl+Z) |
 | SIGUSR1, SIGUSR2 | Terminate | User-defined |
-| SIGHUP (1) | Terminate | Hangup; conventionally "reload config" |
 
 ### Handling Signals
 
@@ -956,7 +982,7 @@ sigaction(SIGINT, &sa, NULL);
 
 **Async-signal safety:** signals interrupt arbitrary code, including code holding locks. Only a specific list of functions is safe to call from a handler (`write`, `_exit`, `signal`, atomic operations). Calling `printf` or `malloc` from a signal handler can deadlock.
 
-**Best practice:** signal handlers set a flag (or write to a self-pipe); the main loop checks the flag in a safe context.
+**Best practice:** signal handlers set a flag (or write to a self-pipe); the main loop checks the flag in a safe context. On Linux, `signalfd()` is the modern alternative: it delivers signals as readable events on a file descriptor, so they can be waited on by `epoll` alongside ordinary I/O instead of needing a handler and self-pipe at all.
 
 ### Signal Masks
 
@@ -1088,7 +1114,7 @@ RUN time (dynamic linker, ld.so, runs before main()):
 
 **Why the runtime phase exists.** Three benefits:
 
-- **Shared memory:** one copy of `libc`'s code in physical RAM is mapped into *every* process that uses it (read-only code pages are shared — see COW in section 2). Statically, every program would carry its own copy.
+- **Shared memory:** one copy of `libc`'s code in physical RAM is mapped into *every* process that uses it. The `.text` pages are read-only and file-backed, so the kernel simply maps the same physical frames into each process — ordinary page sharing, no copy-on-write needed (nothing ever writes to them). Statically, every program would carry its own copy.
 - **Smaller executables:** the binary does not contain libc.
 - **Update once:** patching a security bug in `libc.so` benefits every dynamically-linked program on restart, with no recompilation.
 
@@ -1163,7 +1189,7 @@ Every later call to printf:
 
 So the *first* call pays a one-time resolution cost and patches the GOT; *every subsequent* call is just an indirect jump through a now-filled pointer — effectively free. The first time "teaches" the GOT slot; after that the PLT stub is a trivial forwarder.
 
-**Lazy vs eager.** The above is **lazy binding** — each symbol is resolved the first time it is called, spreading the cost and skipping unused symbols. Setting `LD_BIND_NOW=1` (or building with full RELRO) forces **eager binding**: everything is resolved at startup. Startup is slower, but the GOT is then read-only, which is more secure (an attacker cannot overwrite a GOT slot to hijack a call).
+**Lazy vs eager.** The above is **lazy binding** — each symbol is resolved the first time it is called, spreading the cost and skipping unused symbols. Setting `LD_BIND_NOW=1` (or building with full RELRO — relocation read-only) forces **eager binding**: everything is resolved at startup. Startup is slower, but the GOT is then read-only, which is more secure (an attacker cannot overwrite a GOT slot to hijack a call).
 
 ### Position-Independent Code (PIC)
 
@@ -1195,7 +1221,7 @@ Programs link against a specific version. Lets libc evolve without breaking old 
 | Updates | Recompile everything | Update one .so, restart |
 | Deployment | Single file | Need to ship libraries |
 | Go default | Yes (mostly) | No |
-| Rust default | No (mostly) | Yes (relies on glibc/system libs) |
+| Rust default | Own std + crates (static) | libc only (glibc/system libc) |
 | C/C++ default | No | Yes |
 
 Containers and immutable images sometimes prefer fully static binaries (musl-linked Rust/Go) for reproducibility.

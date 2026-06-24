@@ -21,7 +21,7 @@ $ ip neigh show
 # or legacy:
 $ arp -a
 
-# Output:
+# ip neigh output (arp -a prints a different format):
 10.0.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE
 ```
 
@@ -44,6 +44,7 @@ $ bridge vlan show           # VLAN assignments
 **Show IP addresses:**
 ```bash
 $ ip addr show
+$ ip -br addr                # One line per interface: name, state, addresses
 # or legacy:
 $ ifconfig
 
@@ -60,6 +61,8 @@ $ route -n
 default via 10.0.1.1 dev eth0 proto dhcp metric 100
 10.0.1.0/24 dev eth0 proto kernel scope link src 10.0.1.10
 ```
+
+Field meanings: **`proto`** — who installed the route (`dhcp`, `kernel` for directly-connected subnets, `static`, or a routing daemon); **`scope link`** — the destination is reachable directly on this link, no gateway needed; **`metric`** — tie-breaking cost when several routes match (lower wins); **`src`** — the preferred source address the kernel uses for packets sent via this route.
 
 **Add/delete routes:**
 ```bash
@@ -91,18 +94,21 @@ $ mtr 8.8.8.8               # Live, updates like top
 
 **Path MTU discovery test:**
 ```bash
-$ ping -M do -s 1472 8.8.8.8   # Don't fragment, test MTU
+$ ping -M do -s 1472 8.8.8.8   # -M do = set the IP Don't-Fragment bit; test MTU
 # 1472 data + 28 ICMP/IP header = 1500 bytes
+# With DF set, an oversized packet is dropped (not fragmented), so the probe fails
+# if 1472 exceeds the path MTU -- letting you bisect for the real limit.
 ```
 
 ---
 
 ### Layer 4 — Transport (TCP, UDP)
 
-**Show all sockets (TCP, UDP, listening, established):**
+**Show sockets (TCP, UDP):**
 ```bash
-$ ss -tuln                   # TCP + UDP, listening, numeric
-$ ss -tunap                  # Add processes (requires root)
+$ ss -tuln                   # TCP + UDP, LISTENING only, numeric
+$ ss -tuna                   # TCP + UDP, all states (incl. ESTAB), numeric
+$ ss -tunap                  # add owning process (your own sockets need no root; root to see others')
 
 # Legacy equivalent:
 $ netstat -tuln
@@ -118,10 +124,12 @@ ESTAB   0  0   10.0.1.10:54321   8.8.8.8:443
 	 cubic wscale:7,7 rto:204 rtt:3.5/1.2 cwnd:10 ssthresh:7 send 31.4Mbps
 ```
 
+Field meanings: **`cubic`** — the congestion-control algorithm in use; **`wscale:7,7`** — the window-scale shift factors (send, receive); **`rto:204`** — current retransmission timeout in ms; **`rtt:3.5/1.2`** — smoothed round-trip time / its variance, in ms (the `/` separates the two); **`cwnd:10`** — congestion window in segments; **`ssthresh:7`** — slow-start threshold (the cwnd at which it switches from slow-start to congestion-avoidance).
+
 **Watch TCP states in real-time:**
 ```bash
-$ watch -n 1 'ss -tan | grep ESTAB | wc -l'   # Count ESTABLISHED
-$ ss -tan state time-wait | wc -l             # Count TIME-WAIT
+$ watch -n 1 'ss -H -tan state established | wc -l'   # Count ESTABLISHED (state filter, robust)
+$ ss -H -tan state time-wait | wc -l          # Count TIME-WAIT (no header row)
 ```
 
 **TCP/UDP statistics:**
@@ -213,7 +221,7 @@ $ sudo wireshark &                        # Live capture (requires root)
 **Display filters (Wireshark syntax in tshark):**
 ```bash
 $ tshark -r capture.pcap -Y "tcp.port == 443"
-$ tshark -r capture.pcap -Y "http.request.method == GET"
+$ tshark -r capture.pcap -Y 'http.request.method == "GET"'
 $ tshark -r capture.pcap -Y "dns.qry.name contains google"
 ```
 
@@ -243,6 +251,9 @@ $ ethtool -S eth0                        # Driver statistics
 ```bash
 $ sudo conntrack -L                      # List tracked connections
 $ sudo conntrack -L -p tcp --state ESTABLISHED
+$ sudo conntrack -C                      # Current tracked connection count
+$ sudo conntrack -S                      # Per-CPU stats (insert_failed, drop)
+$ sysctl net.netfilter.nf_conntrack_max  # Table capacity (vs the count above)
 ```
 
 ---
@@ -251,15 +262,16 @@ $ sudo conntrack -L -p tcp --state ESTABLISHED
 
 **View iptables rules:**
 ```bash
-$ sudo iptables -L -n -v                 # List all rules
-$ sudo iptables -t nat -L -n -v          # NAT table
-$ sudo iptables -t mangle -L -n -v       # Mangle table
+$ sudo iptables -L -n -v                 # List all rules (default 'filter' table)
+$ sudo iptables -t nat -L -n -v          # NAT table (address/port translation)
+$ sudo iptables -t mangle -L -n -v       # Mangle table: alters packet headers/marks
+                                         #   (TOS/DSCP, TTL, fwmark) rather than filtering
 ```
 
 **Modern nftables (replaces iptables):**
 ```bash
 $ sudo nft list ruleset                  # Show all rules
-$ sudo nft list table inet filter
+$ sudo nft list table inet filter        # 'inet' family matches both IPv4 and IPv6
 ```
 
 **Check NAT translations (on router/NAT gateway):**
@@ -280,8 +292,8 @@ $ sudo networkctl status
 
 **Reload network (NetworkManager):**
 ```bash
-$ sudo nmcli connection reload
-$ sudo nmcli connection up eth0
+$ sudo nmcli connection reload          # Re-read profiles from disk
+$ sudo nmcli device connect eth0        # nmcli 'connection up' takes a profile name, not a device
 ```
 
 **Show active connections:**
@@ -321,7 +333,7 @@ $ sudo sysctl -p
 
 **Common tuning parameters:**
 ```bash
-net.ipv4.tcp_tw_reuse=1               # Reuse TIME_WAIT sockets
+net.ipv4.tcp_tw_reuse=1               # Reuse TIME_WAIT for new outbound connections
 net.ipv4.tcp_fin_timeout=30           # Faster FIN timeout
 net.core.somaxconn=4096               # Backlog queue size
 net.ipv4.tcp_max_syn_backlog=8192     # SYN queue size
@@ -391,7 +403,3 @@ net.ipv4.tcp_wmem=4096 65536 16777216 # TCP write buffer
    ```bash
    $ sudo tcpdump -i eth0 host example.com -n
    ```
-
----
-
-**WHERE TO PASTE:** Add this as a new section **"11. Linux Networking Commands"** at the very end of your `Networking-Fundamentals.md`, after "10. Debugging & Tools" (or replace that section if you want this as the practical reference).

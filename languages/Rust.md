@@ -11,7 +11,7 @@ A quick-reference guide covering Rust's core concepts, syntax, and common patter
 3. [Control Flow](#control-flow)
 4. [Functions](#functions)
 5. [Structs and Enums](#structs-and-enums)
-6. [Pattern Matching](#pattern-matching) 
+6. [Pattern Matching](#pattern-matching)
 7. [Generics](#generics)
 8. [Traits](#traits)
 9. [Option and Result](#option-and-result)
@@ -104,7 +104,7 @@ Rust has no garbage collector. Memory is managed through a set of ownership rule
 
 1. Each value has exactly one owner.
 2. When the owner goes out of scope, the value is dropped.
-3. Assignment moves ownership (for heap types). The original binding becomes invalid.
+3. Assignment moves ownership (for non-`Copy` types). The original binding becomes invalid.
 
 ```rust
 let s1 = String::from("hello");
@@ -194,7 +194,6 @@ for item in &collection { }     // borrow
 for item in &mut collection { } // mutable borrow
 for item in collection { }      // consume
 ```
-
 
 ---
 
@@ -362,7 +361,6 @@ match age {
 // matches! macro (returns bool)
 let is_small = matches!(value, 0..=10);
 ```
-
 
 ---
 
@@ -572,7 +570,7 @@ while let Some(top) = stack.pop() {
     println!("{top}");
 }
 
-// let-else (Rust 1.65+) -- bind or diverge (return, break, panic, etc.)
+// let-else -- bind or diverge (return, break, panic, etc.)
 let Some(value) = maybe_value else {
     return Err("missing value".into());
 };
@@ -656,6 +654,35 @@ fn read_config(path: &str) -> Result<String, AppError> {
     let content = fs::read_to_string(path)?;
     Ok(content)
 }
+```
+
+```rust
+// Box<dyn Error> -- trivial error type for prototypes / main; any error that
+// implements std::error::Error converts via ? (no manual From needed).
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let n: i32 = "42".parse()?;             // ParseIntError -> Box<dyn Error>
+    let s = std::fs::read_to_string("x")?;  // io::Error -> Box<dyn Error>
+    Ok(())
+}
+```
+
+```rust
+// Library errors: thiserror derives Display + Error + From, no boilerplate.
+#[derive(thiserror::Error, Debug)]
+enum AppError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),   // #[from] generates the From impl
+    #[error("bad config: {0}")]
+    Custom(String),
+}
+
+// Application errors: anyhow erases the type and adds context.
+fn load() -> anyhow::Result<Config> {
+    let raw = std::fs::read_to_string("config.toml")
+        .context("reading config.toml")?;  // anyhow::Context
+    Ok(toml::from_str(&raw)?)
+}
+// thiserror for libraries (typed, exhaustive); anyhow / Box<dyn Error> for apps and main.
 ```
 
 ---
@@ -776,8 +803,8 @@ iter
     .count()
     .sum::<i32>()
     .product::<i32>()
-    .min()                     // Option<T>
-    .max()                     // Option<T>
+    .min()                     // Option<&T>
+    .max()                     // Option<&T>
     .min_by_key(|x| x.len())
     .max_by_key(|x| x.len())
     .find(|x| **x > 3)        // Option<&T>
@@ -927,8 +954,8 @@ let sub = &s[0..5];
 Lifetimes are the compiler's way of tracking how long references are valid. Most of the time the compiler infers them automatically (lifetime elision). You only need explicit annotations when the compiler can't determine the relationship between input and output references.
 
 ```rust
-// This tells the compiler: the returned reference lives at least as long
-// as the shorter of x and y.
+// This ties the output to both inputs: the returned reference is valid for no
+// longer than the shorter of x's and y's lifetimes (it must not outlive either).
 fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
     if x.len() > y.len() { x } else { y }
 }
@@ -1027,6 +1054,8 @@ fn sanitize(input: &str) -> Cow<str> {
 
 ## Concurrency
 
+Rust's borrow checker plus the `Send`/`Sync` auto-traits (traits the compiler implements automatically when every field does) make data races impossible in safe code. For the underlying model — happens-before, memory ordering, deadlock/livelock, lock-free structures — see `Concurrency.md`.
+
 ### Threads
 
 ```rust
@@ -1104,6 +1133,8 @@ let lock = RwLock::new(5);
 
 Rust's async model is based on futures (lazy, poll-based). The language provides `async`/`await` syntax, but an executor (runtime) is required to drive futures to completion. Tokio is the most widely used runtime.
 
+The event-loop model, function-coloring, and the "CPU work blocks the loop" hazard are covered conceptually in `Concurrency.md`.
+
 ### Basics
 
 ```rust
@@ -1176,6 +1207,20 @@ let result = tokio::task::spawn_blocking(|| {
 }).await.unwrap();
 ```
 
+```rust
+// std::sync::Mutex is the right default even in async code: locking is cheap and
+// the critical section should be short (no .await while holding the guard).
+// Its guard is !Send, so the compiler REJECTS holding it across .await in a
+// spawned (Send) future -- catching this bug at compile time.
+async fn bad(m: &std::sync::Mutex<i32>) {
+    let g = m.lock().unwrap();
+    do_async().await;   // won't compile if spawned: guard held across await -> !Send future
+}
+// Fix (usual): copy the value out, drop the guard, then await:
+//   let v = *m.lock().unwrap();  do_async().await;
+// Only if a lock MUST be held across an .await, use tokio::sync::Mutex (an async mutex).
+```
+
 ### Concurrency Patterns
 
 ```rust
@@ -1233,7 +1278,7 @@ println!("{}", *rx.borrow());
 ### Async Traits
 
 ```rust
-// Since Rust 1.75, async fn in traits works natively
+// async fn in traits works natively (for dyn dispatch, use the async-trait crate)
 trait HttpClient {
     async fn get(&self, url: &str) -> Result<String, Error>;
 }
@@ -1278,13 +1323,13 @@ Unsafe Rust allows opting out of certain compiler guarantees. An `unsafe` block 
 let mut x = 42;
 
 // Creating raw pointers is safe
-let r1 = &x as *const i32;     // immutable raw pointer
-let r2 = &mut x as *mut i32;   // mutable raw pointer
+let p = &mut x as *mut i32;    // one mutable raw pointer
+let c = p as *const i32;       // const view of the same allocation
 
 // Dereferencing requires unsafe
 unsafe {
-    println!("r1 = {}", *r1);
-    *r2 = 100;
+    println!("r1 = {}", *c);
+    *p = 100;
 }
 
 // Pointers from arbitrary addresses (no guarantee of validity)
@@ -1334,6 +1379,14 @@ unsafe {
     COUNTER += 1;
     println!("COUNTER: {COUNTER}");
 }
+```
+
+```rust
+// Prefer an atomic -- safe, no unsafe block, no data race:
+use std::sync::atomic::{AtomicU32, Ordering};
+static COUNTER: AtomicU32 = AtomicU32::new(0);
+COUNTER.fetch_add(1, Ordering::Relaxed);
+println!("{}", COUNTER.load(Ordering::Relaxed));
 ```
 
 ### Unsafe Traits
@@ -1403,7 +1456,7 @@ struct CBuffer {
 #[repr(C)]          // C-compatible layout (required for FFI structs)
 struct Point { x: f64, y: f64 }
 
-#[repr(transparent)] // same layout as the single field (newtype FFI safety)
+#[repr(transparent)] // same layout as the single field (newtype = single-field wrapper struct; FFI safety)
 struct Wrapper(i32);
 
 #[repr(u8)]          // set the discriminant type for enums
@@ -1489,7 +1542,7 @@ mod math {
 
 ### File-based Modules
 
-Each module is either a single file (`routes.rs`) or a directory with a same-named parent file (`routes.rs` + `routes/`). This is the modern layout preferred since Rust 2018; the older `mod.rs` convention still compiles but is discouraged.
+Each module is either a single file (`routes.rs`) or a directory with a same-named parent file (`routes.rs` + `routes/`). This is the modern layout; the older `mod.rs` convention still compiles but is discouraged.
 
 ```
 my_project/

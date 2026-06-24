@@ -49,13 +49,13 @@ extern int shared; // declaration only, defined elsewhere
 // Type qualifiers
 const int x = 10;       // read-only
 volatile int flag;      // may change outside program control (hardware, signals)
-restrict int *p;        // pointer is the only way to access the pointed-to memory (C99)
+int *restrict p;        // for p's lifetime, the pointed-to object is accessed only through p (C99)
 _Atomic int counter;    // atomic access (C11)
 ```
 
 ### Integer Types
 
-| Type | Minimum Range | Typical Size |
+| Type | Typical Range | Typical Size |
 |------|--------------|--------------|
 | `char` | -128 to 127 (or 0 to 255) | 1 byte |
 | `signed char` | -128 to 127 | 1 byte |
@@ -66,6 +66,26 @@ _Atomic int counter;    // atomic access (C11)
 | `long long` | -2^63 to 2^63-1 | 8 bytes |
 
 All integer types have `unsigned` variants doubling the positive range.
+
+```c
+// Overflow: signed overflow is UNDEFINED BEHAVIOR; unsigned wraps modulo 2^N.
+int      a = INT_MAX + 1;    // UB (do not rely on wrapping)
+unsigned u = UINT_MAX + 1u;  // defined: wraps to 0
+
+// Mixed signed/unsigned: the signed operand converts to unsigned (usual arithmetic conversions).
+int i = -1;
+if (i < sizeof(x)) { ... }   // FALSE: -1 becomes a huge unsigned value
+                             // compare sizes with size_t, or cast deliberately
+
+// Plain char may be signed or unsigned (implementation-defined).
+// getc/fgetc/getchar return int, not char, to distinguish EOF (-1) from byte 0xFF:
+int c;
+while ((c = getchar()) != EOF) { ... }   // storing in a char first can lose EOF or loop forever
+
+// ctype.h functions require a value representable as unsigned char or EOF;
+// passing a negative plain char is UB:
+isalpha((unsigned char)c);               // always cast
+```
 
 ### Fixed-Width Integers (C99)
 
@@ -139,6 +159,9 @@ sizeof(arr) / sizeof(arr[0])  // number of elements in a stack-allocated array
 +  -  *  /  %    // add, sub, mul, div, modulo
 ++x  --x         // prefix increment/decrement (returns new value)
 x++  x--         // postfix increment/decrement (returns old value)
+
+// UB: modifying an object twice between sequence points, or reading it for any
+// purpose other than computing the new value:  i = i++;   a[i] = i++;
 ```
 
 ### Comparison and Logical
@@ -254,7 +277,6 @@ int add(int a, int b) {          // definition
 // void return type
 void greet(const char *name) {
     printf("Hello, %s\n", name);
-    return
 }
 
 // Static functions (file-scoped, not visible to other translation units)
@@ -276,7 +298,7 @@ _Noreturn void fatal(const char *msg) {
 // Passing arrays (decays to pointer, size is lost)
 void process(int arr[], size_t len);     // arr is int*
 void process(int *arr, size_t len);      // equivalent
-void matrix(int rows, int cols, int m[rows][cols]); // VLA parameter (C99)
+void matrix(int rows, int cols, int m[rows][cols]); // VLA (variable-length array) parameter (C99)
 
 // Returning pointers (never return a pointer to a local variable)
 int* allocate(size_t n) {
@@ -305,7 +327,7 @@ int arr[5] = {10, 20, 30, 40, 50};
 int *p = arr;       // arrays decay to pointers
 p++;                // now points to arr[1]
 p += 2;             // now points to arr[3]
-int diff = p - arr; // 3 (element count, not byte count)
+ptrdiff_t diff = p - arr; // 3 (element count, not bytes; the difference has type ptrdiff_t)
 ```
 
 ### Pointer to Pointer
@@ -553,7 +575,9 @@ union Value v;
 v.i = 42;
 printf("%d\n", v.i);
 
-v.f = 3.14;        // now only v.f is valid, reading v.i is undefined
+v.f = 3.14;        // reading v.i now reinterprets the bytes (type punning):
+                   // allowed in C -- the value is unspecified, and for some types may be a
+                   // trap representation (a bit pattern invalid for the type); UB in C++
 
 sizeof(union Value) // size of the largest member (16)
 ```
@@ -705,10 +729,10 @@ free(arr);
 // Function-like macros (watch out for side effects and missing parentheses)
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define SQUARE(x) ((x) * (x))
-// Pharentesis are needed to avoid errors when we use an expression as input
+// Parentheses around each parameter and the whole body prevent precedence and side-effect bugs
 // SQUARE(i++) is UB! Prefer inline functions for anything non-trivial.
 
-// Multi-line macro
+// Multi-line macro (typeof is a GNU extension, standardized in C23)
 #define SWAP(a, b) do { \
     typeof(a) _tmp = (a); \
     (a) = (b);            \
@@ -721,7 +745,7 @@ free(arr);
 // Token pasting
 #define CONCAT(a, b) a##b        // CONCAT(foo, bar) -> foobar
 
-// Variadic macro
+// Variadic macro (##__VA_ARGS__ is a GNU extension; C23 uses __VA_OPT__)
 #define LOG(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
 
 // Undef
@@ -893,7 +917,7 @@ fseek(f, 0, SEEK_SET);              // beginning
 fseek(f, 0, SEEK_END);              // end
 fseek(f, offset, SEEK_CUR);         // relative to current position
 long pos = ftell(f);                 // current position
-rewind(f);                           // equivalent to fseek(f, 0, SEEK_SET)
+rewind(f);                           // like fseek(f, 0, SEEK_SET), but also clears the error and EOF indicators
 
 // Flushing
 fflush(f);                           // write buffered data to file
@@ -904,13 +928,13 @@ feof(f)                              // true if end-of-file reached
 ferror(f)                            // true if an error occurred
 clearerr(f)                          // reset error and EOF indicators
 
-// Read entire file
+// Read entire file (open with "rb": ftell is a reliable byte count only for binary streams)
 fseek(f, 0, SEEK_END);
-long size = ftell(f);               
+long size = ftell(f);
 rewind(f);                          // return to beginning
 char *content = malloc(size + 1);
-fread(content, 1, size, f);
-content[size] = '\0';
+size_t n = fread(content, 1, size, f);   // check the return: bytes actually read
+content[n] = '\0';
 
 // Standard streams
 stdin   // standard input
@@ -991,6 +1015,10 @@ sscanf(line, "%d %d", &a, &b);
 <<   // left shift
 >>   // right shift
 
+// UB: shift count negative or >= type width; left-shifting a negative value or
+// shifting a 1 into/through the sign bit of a signed type. Right-shift of a
+// negative signed value is implementation-defined. Prefer unsigned for shifting.
+
 // Common patterns
 flags |= MASK;          // set bits
 flags &= ~MASK;         // clear bits
@@ -998,7 +1026,7 @@ flags ^= MASK;          // toggle bits
 if (flags & MASK) { }   // test bits
 
 // Bit manipulation
-#define BIT(n) (1U << (n))
+#define BIT(n) (1U << (n))      // use 1ULL for bit positions >= 32
 #define SET_BIT(x, n)    ((x) |= BIT(n))
 #define CLEAR_BIT(x, n)  ((x) &= ~BIT(n))
 #define TOGGLE_BIT(x, n) ((x) ^= BIT(n))
@@ -1043,7 +1071,8 @@ apply(arr, len, doubled);
 typedef int (*CompareFunc)(const void *, const void *);
 
 int compare_ints(const void *a, const void *b) {
-    return (*(const int *)a) - (*(const int *)b);
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);   // avoid signed overflow from a - b
 }
 
 qsort(arr, len, sizeof(int), compare_ints);
@@ -1184,6 +1213,8 @@ cleanup:
 
 POSIX threads. Link with `-lpthread`.
 
+See `Concurrency.md` for memory ordering, deadlock avoidance, and weak vs strong CAS (compare-and-swap) at the conceptual level.
+
 ### Thread Creation and Joining
 
 ```c
@@ -1202,8 +1233,8 @@ pthread_create(&thread, NULL, worker, &id);
 void *result;
 pthread_join(thread, &result); // block until thread finishes
 
-// Detached thread (resources freed automatically on exit)
-pthread_detach(thread);
+// --- OR, instead of joining: detach so resources free automatically on exit ---
+// pthread_detach(thread);
 ```
 
 ### Mutex

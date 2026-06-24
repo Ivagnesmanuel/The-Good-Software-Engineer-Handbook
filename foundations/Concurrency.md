@@ -33,12 +33,12 @@ Every concurrency primitive is assembled from four layers. The governing princip
 
 | Layer | What it owns | Examples |
 |-------|--------------|----------|
-| **Hardware (CPU)** | Atomic instructions, cache coherence, and the per-ISA memory-ordering rules. No software can subdivide these. | `CMPXCHG`, `LOCK XADD` (x86); `LDXR`/`STXR` load-linked/store-conditional (ARM); MESI coherence; store buffers |
+| **Hardware (CPU)** | Atomic instructions, cache coherence, and the per-ISA (instruction-set architecture) memory-ordering rules. No software can subdivide these. | `CMPXCHG`, `LOCK XADD` (x86); `LDXR`/`STXR` load-linked/store-conditional (ARM); MESI coherence; store buffers |
 | **Kernel / OS** | Scheduling threads onto cores, and *blocking and waking* them. Only reached on contention or real I/O waits. | futex (Linux), `epoll`/`kqueue`/`io_uring`, context switches, `clone()` behind thread creation, priority inheritance |
 | **Runtime / standard library** | Ergonomic wrappers over hardware+kernel, plus the machinery of the language's concurrency model. | pthreads, `std::mutex`, the Go scheduler + goroutines + channels, tokio's executor, the JVM, Python's GIL |
 | **Your code** | The *protocol*: what state is shared, who may access it, and in what order. The lower layers supply the tools; correctness remains the responsibility of this layer. | CAS retry loops, chosen lock order, channels-vs-mutex decisions, ABA mitigations |
 
-A primitive typically spans several layers. Consider a mutex: the uncontended lock and unlock are a hardware atomic (no kernel involvement); under contention the runtime invokes a futex so that the kernel can park the waiting thread; and *which* data the mutex protects is determined by the application's contract.
+A primitive typically spans several layers. Consider a mutex: the uncontended lock and unlock are a hardware atomic (no kernel involvement); under contention the runtime invokes a futex (fast userspace mutex) so that the kernel can park the waiting thread; and *which* data the mutex protects is determined by the application's contract.
 
 ### How each language approaches concurrency
 
@@ -50,10 +50,10 @@ The hardware is identical across all of them; languages differ in the model they
 | **Rust** | Shared-memory threads; async | Yes | `Mutex<T>` owns its data; atomics; channels | Compile-time: `Send`/`Sync` + borrow checker make data races *impossible* in safe code |
 | **Go** | CSP (goroutines + channels); shared memory available | Yes (M:N scheduler) | Channels preferred; `sync.Mutex` available | Runtime race detector (`-race`); no compile-time prevention |
 | **Java / JVM** | Shared-memory threads + `java.util.concurrent` | Yes | `synchronized`, locks, atomics, concurrent collections | JMM + tooling; no compile-time race prevention |
-| **JavaScript / Node** | Single-threaded event loop (async) | No, within a loop (Workers are separate) | `async`/`await`; no shared memory | No data races on JS objects (one thread) |
-| **Python** | Threads (GIL-limited) + asyncio | No for threads (use `multiprocessing`) | `Lock`, asyncio, queues | GIL serializes bytecode; race *conditions* remain |
+| **JavaScript / Node** | Single-threaded event loop (async) | No, within a loop (Workers are separate) | `async`/`await`; `SharedArrayBuffer` + `Atomics` for cross-Worker shared memory | No data races on JS objects (one thread); `SharedArrayBuffer` can race |
+| **Python** | Threads (GIL-limited) + asyncio | No for threads (use `multiprocessing`) | `Lock`, asyncio, queues | Global Interpreter Lock (GIL) serializes bytecode; race *conditions* remain |
 
-Sections 7–10 expand on each model (shared-memory, CSP, async); §11's language note revisits the categories of race that remain possible in each language.
+Sections 7–10 expand on each model (shared-memory, CSP, actors, async); section 11's language note revisits the categories of race that remain possible in each language.
 
 ---
 
@@ -72,7 +72,7 @@ Parallelism:  multiple tasks executing simultaneously on multiple CPUs.
 
 A web server handling 10,000 requests is concurrent. On one core, only one runs at a time, scheduled in turn. On 16 cores, up to 16 run in true parallel.
 
-You can have concurrency without parallelism (single-threaded async I/O) and parallelism without concurrency (a single batch job split into independent CPU tasks).
+You can have concurrency without parallelism (single-threaded async I/O) and parallelism without concurrency (one sequential thread whose hardware runs sub-operations at once — SIMD lanes, instruction-level parallelism — with no concurrent task structure).
 
 ```
 Concurrency        Parallelism      Both
@@ -112,7 +112,7 @@ Each level is faster and smaller. Reads and writes touch the cache first; the ca
 
 ### Cache Coherence
 
-When multiple cores have the same memory in their private caches, what happens when one writes? Hardware **cache coherence protocols** (MESI, MOESI) ensure each core eventually sees the new value, by invalidating or updating other cores' copies.
+When multiple cores have the same memory in their private caches, what happens when one writes? Hardware **cache coherence protocols** (MESI, MOESI — named for the per-cache-line states they track: Modified, Exclusive, Shared, Invalid, plus Owned in MOESI) ensure each core eventually sees the new value, by invalidating or updating other cores' copies.
 
 ```
 Core 0 has X=10 in L1.
@@ -145,7 +145,7 @@ struct Counter {
 };
 ```
 
-The cleaner modern idiom is to align the entire struct: `struct _Alignas(64) Counter { atomic_long count; };` (C++: `alignas(64)`). False sharing reappears in §11 as a named hazard, but the mechanism and the fix are documented here.
+The cleaner modern idiom puts the alignment on the member itself, forcing each contended field onto its own cache line: `struct Counter { _Alignas(64) atomic_long alice; _Alignas(64) atomic_long bob; };` (C++: `alignas(64)`). False sharing reappears in section 11 as a named hazard, but the mechanism and the fix are documented here.
 
 ### Memory Reordering
 
@@ -166,7 +166,7 @@ Thread B (sees flag == 1):
   read x;        // can this see x == 0?
 ```
 
-Yes: on x86 this reordering is usually prevented, but on ARM and POWER it is permitted unless memory barriers or atomics are used.
+On x86 (TSO) the hardware always preserves this store and load order, so the anomaly cannot arise from the CPU — only the compiler can reorder, which `atomic`/barriers prevent. On ARM and POWER the hardware itself permits the reordering unless barriers or atomics are used.
 
 ### Memory Models
 
@@ -182,7 +182,7 @@ Language memory models abstract over hardware:
 
 | Language | Memory model |
 |----------|--------------|
-| Java | JMM — happens-before, volatile, locks |
+| Java | JMM (Java Memory Model) — happens-before, volatile, locks |
 | C11, C++11+ | Atomics with ordering parameters (seq_cst, acquire, release, relaxed) |
 | Rust | Same as C++ atomics, plus stronger compile-time safety |
 | Go | Happens-before via channels, sync.Mutex, sync/atomic |
@@ -211,7 +211,7 @@ An atomic operation is one that either completes entirely or not at all from the
 
 ### Where atomics live in the stack
 
-Atomics are the clearest illustration of the layer map from §0: **the OS is not involved at all** — there are no syscalls, no blocking, and no scheduler. An atomic is simply a hardware instruction exposed under a callable name:
+Atomics are the clearest illustration of the layer map from section 0: **the OS is not involved at all** — there are no syscalls, no blocking, and no scheduler. An atomic is simply a hardware instruction exposed under a callable name:
 
 | Layer | For atomics specifically |
 |-------|--------------------------|
@@ -219,7 +219,7 @@ Atomics are the clearest illustration of the layer map from §0: **the OS is not
 | **Compiler + standard library** | The callable names — `atomic_fetch_add`, `atomic_load`, `atomic_compare_exchange_weak`. Each compiles to *one* instruction (not a function call, not a syscall). The compiler also emits fences and suppresses reordering to honor your `memory_order_*`. |
 | **Your code** | Multi-step logic on top: the CAS retry loop, ABA mitigations, the lock-free structure. |
 
-A practical reading rule for this section: anything named `atomic_*` is a **provided primitive** that compiles to a CPU instruction; everything surrounding it — the loop, the variables, the recomputation — is **application code**. No runtime machinery sits in between.
+The reading rule for the rest of this section: anything named `atomic_*` is a hardware primitive (one CPU instruction, no runtime machinery), and everything around it — the loop, the variables, the recomputation — is your application code.
 
 ### Atomic Reads and Writes
 
@@ -267,7 +267,7 @@ The compare and the swap happen as one indivisible step — no other thread can 
 
 Because a CAS can fail (another thread won the race), the standard pattern is a **retry loop**: read the current value, compute the new value from it, and CAS. On failure, `expected` is refreshed with the value actually present, and the computation is repeated.
 
-Here `atomic_load` and `atomic_compare_exchange_weak` are **provided primitives** (each one CPU instruction); the loop, the variables, and the recomputation are **application code**:
+Applying the reading rule — the `atomic_*` calls are the hardware primitives, the rest is application code:
 
 ```c
 // Lock-free counter (illustrative -- atomic_fetch_add does this in one instruction):
@@ -275,10 +275,8 @@ atomic_int counter = 0;
 
 void increment(void) {
     int old = atomic_load(&counter);          // primitive: read current value
-    int desired = old + 1;                    // application code: compute the update
-    // application code: loop until the primitive (CAS) commits.
-    // On failure, compare_exchange_weak overwrites `old` with the
-    // observed value, and the loop recomputes and retries.
+    // On failure, compare_exchange_weak overwrites `old` with the observed
+    // value; the loop then recomputes and retries until the CAS commits.
     while (!atomic_compare_exchange_weak(&counter, &old, old + 1)) {  // primitive
         // old holds the current value here; retry with the fresh reading.
     }
@@ -287,7 +285,7 @@ void increment(void) {
 
 **weak vs strong:** `compare_exchange_weak` may fail *spuriously* (return false even when `*addr == expected`), so it is only safe inside a retry loop, but it compiles to cheaper code on some architectures (e.g. ARM's load-linked/store-conditional). Use `compare_exchange_strong` when not looping, where a false negative would be a bug.
 
-**ABA problem:** CAS only checks that the value is equal, not that it never changed. A thread reads value A and prepares an update based on A. Meanwhile another thread changes A → B → A. The CAS still succeeds because the bits match, even though the underlying state churned in between — which corrupts structures like lock-free stacks where the "A" is a reused pointer to a freed-and-reallocated node. Mitigations: version/tag counters (bump a counter on every change so A-with-tag-1 ≠ A-with-tag-2), hazard pointers, and epoch-based reclamation.
+**ABA problem:** CAS only checks that the value is equal, not that it never changed. A thread reads value A and prepares an update based on A. Meanwhile another thread changes A → B → A. The CAS still succeeds because the bits match, even though the underlying state churned in between — which corrupts structures like lock-free stacks where the "A" is a reused pointer to a freed-and-reallocated node. The direct fix is a version/tag counter — a tagged CAS bumps a counter on every change, so A-with-tag-1 ≠ A-with-tag-2 and the equality check sees the churn. Hazard pointers and epoch-based reclamation (EBR) attack a related but distinct hazard: in pointer-based ABA the danger is that the "A" node was freed and reallocated mid-operation, so they make safe *memory reclamation* the thing that is delayed (a node is not freed while another thread might still dereference it), removing the freed-and-reused case rather than the bit-equality case itself.
 
 ### Memory Ordering Levels (C11 / C++)
 
@@ -346,7 +344,7 @@ counter++;              // critical section
 pthread_mutex_unlock(&m);
 ```
 
-The kernel-level primitive backing most mutexes is a **futex** on Linux: fast userspace uncontended path, fall back to kernel only when contention happens. This is a concrete instance of the §0 layer map — the uncontended lock is a hardware atomic requiring no syscall; only a *contended* lock reaches the kernel to park the waiting thread.
+The kernel-level primitive backing most mutexes is a **futex** on Linux: fast userspace uncontended path, fall back to kernel only when contention happens. This is a concrete instance of the section 0 layer map — the uncontended lock is a hardware atomic requiring no syscall; only a *contended* lock reaches the kernel to park the waiting thread.
 
 ### Language Note: Lock Release Across Languages
 
@@ -354,7 +352,7 @@ The C example above must call `pthread_mutex_unlock` explicitly. Any early `retu
 
 ```
 C:       lock; ... ; unlock;          // manual release required on every path
-C++:     std::lock_guard g(m);        // RAII -- unlocks when g leaves scope, even on exception
+C++:     std::lock_guard g(m);        // RAII (Resource Acquisition Is Initialization): unlocks when g leaves scope, even on exception
 Go:      mu.Lock(); defer mu.Unlock() // defer runs on function exit, all paths
 Python:  with lock:                   // context manager releases on block exit
 Rust:    let g = m.lock().unwrap();   // guard unlocks on drop -- AND m wraps the data:
@@ -466,13 +464,13 @@ NOT OK (different code path):
   acquire A          <-- could deadlock with the above
 ```
 
-Static analysis tools (clang ThreadSanitizer, Java's lock detector) can catch some violations.
+Dynamic detectors (ThreadSanitizer, Java's built-in deadlock detector) catch some violations at runtime; static checkers — Clang's Thread Safety Analysis (`-Wthread-safety` with `guarded_by` annotations) — catch lock-discipline violations at compile time.
 
 ---
 
 ## 5. Higher-Level Synchronization
 
-These primitives sit at the runtime/standard-library layer of §0: each is built from locks and atomics and encodes a common coordination pattern that is error-prone to assemble by hand from a bare mutex.
+These primitives sit at the runtime/standard-library layer of section 0: each is built from locks and atomics and encodes a common coordination pattern that is error-prone to assemble by hand from a bare mutex.
 
 ### Condition Variables
 
@@ -498,6 +496,8 @@ while (queue_empty(&q))           // loop, not if -- see below
 int x = queue_pop(&q);
 pthread_mutex_unlock(&m);
 ```
+
+The producer above signals *after* releasing the mutex. This is a deliberate trade-off: signalling outside the lock avoids the woken consumer immediately blocking on a still-held mutex (the "hurry up and wait" inefficiency), but it slightly widens the window for the signal to land, which is harmless here only because the consumer re-checks the predicate in a loop. Signalling while holding the lock is the more conservative default; release-then-signal is the optimization.
 
 **Always wait in a loop** (re-check the predicate after waking), for two reasons: spurious wakeups are possible — `pthread_cond_wait` may return without a matching signal — and even after a genuine signal, another thread may have consumed the condition before the woken thread re-acquires the mutex.
 
@@ -555,7 +555,7 @@ void init_resource(void) {
 pthread_once(&once, init_resource);
 ```
 
-This replaces the error-prone hand-rolled double-checked-locking idiom (§13). The runtime guarantees both halves of correctness: the initializer runs exactly once, and a happens-before edge makes its result visible to every later caller — so no mutex is needed on subsequent accesses. Equivalents: C++ `std::call_once`, Go `sync.Once`, Rust `OnceCell`/`LazyLock`.
+This replaces the error-prone hand-rolled double-checked-locking idiom (section 13). The runtime guarantees both halves of correctness: the initializer runs exactly once, and a happens-before edge makes its result visible to every later caller — so no mutex is needed on subsequent accesses. Equivalents: C++ `std::call_once`, Go `sync.Once`, Rust `OnceCell`/`LazyLock`.
 
 ### Atomic Counters and Flags
 
@@ -573,13 +573,13 @@ while (!atomic_load_explicit(&shutdown, memory_order_acquire)) {
 atomic_store_explicit(&shutdown, true, memory_order_release);
 ```
 
-The `release` store publishes all writes that preceded it; the matching `acquire` load guarantees the workers observe those writes once they see the flag set (§3). An atomic is not a substitute for a mutex when several values must change together — that requires either a lock or a careful lock-free protocol (§6).
+The `release` store publishes all writes that preceded it; the matching `acquire` load guarantees the workers observe those writes once they see the flag set (section 3). An atomic is not a substitute for a mutex when several values must change together — that requires either a lock or a careful lock-free protocol (section 6).
 
 ---
 
 ## 6. Lock-Free and Wait-Free
 
-A data structure is **lock-free** if at least one thread makes progress in finite time, regardless of other threads' states (no thread can be blocked indefinitely by another thread's blocking).
+A data structure is **lock-free** if at least one thread makes progress in finite time, regardless of other threads' states (no thread can be blocked indefinitely by another thread's blocking; an individual thread may still be starved indefinitely, and bounding per-thread progress is what wait-free adds).
 
 **Wait-free** is stronger: every thread completes in bounded steps regardless of others.
 
@@ -618,7 +618,7 @@ Lock-free programming is its own field. Standard patterns:
 - Epoch-based reclamation (crossbeam in Rust).
 - Read-Copy-Update (RCU, used heavily in the Linux kernel).
 
-Prefer a battle-tested library to implementing these yourself — see the §13 anti-pattern "Reinventing concurrent data structures" for the relevant libraries and the reasoning.
+Prefer a battle-tested library to implementing these yourself — see the section 13 anti-pattern "Reinventing concurrent data structures" for the relevant libraries and the reasoning.
 
 ---
 
@@ -729,6 +729,33 @@ CSP doesn't eliminate concurrency hazards; it shifts them. Channel deadlocks and
 
 ---
 
+## 9. Actor Model
+
+An actor is a unit of computation that owns private state, communicates only by asynchronous messages, and processes one message at a time; concurrency arises from many actors running independently, never from shared memory.
+
+Each actor has a mailbox (a queue of inbound messages). Because an actor handles messages sequentially, its state needs no locks — there is never more than one thread inside an actor. Per message, an actor may create other actors, send messages, and change how it will handle the next message.
+
+```
+  message                 +---------+
+ --------->  [mailbox] -> | actor   |   one message at a time;
+                          | private |   no shared state, no locks
+                          | state   |
+                          +---------+
+                               | sends
+                               v
+                          other actors
+```
+
+Contrast with CSP (section 8): in CSP the channel is the named first-class entity and the processes are anonymous; in the actor model the actor (its address) is named and the channel is implicit (its mailbox). CSP sends rendezvous (unbuffered) or block on a bounded buffer; actor sends are asynchronous onto a conceptually unbounded mailbox.
+
+Erlang/OTP (Open Telecom Platform — Erlang's standard runtime and library set) and Akka (JVM) are the canonical implementations. The model underlies supervision trees: a failed actor is restarted by its supervisor ("let it crash"), which is tractable precisely because an actor's state is isolated.
+
+**Pros:** strong isolation (no shared memory, hence no data races); location transparency (an address may be local or remote, easing distribution); resilience via supervision.
+
+**Cons:** message-passing and copying overhead; mailboxes grow under backpressure; delivery and ordering guarantees are weak (typically at-most-once, no global order); logic-level race *conditions* remain.
+
+---
+
 ## 10. Async / Event Loop
 
 A single thread runs many concurrent tasks by giving each one a brief turn, yielding when it would block (typically on I/O). No true parallelism within the event loop; concurrency by interleaving.
@@ -805,7 +832,7 @@ Async loop  --> CPU pool  (for synchronous CPU work)
             --> I/O pool  (for libraries that aren't async-aware)
 ```
 
-Go takes this further with M:N — goroutines are async-ish but the runtime makes them feel synchronous, and the scheduler transparently moves them between OS threads.
+Go takes this further with M:N scheduling: goroutines are multiplexed onto OS threads asynchronously, but the runtime suspends and resumes them at blocking points so the code is written in a straight-line synchronous style, and the scheduler transparently moves them between OS threads.
 
 ---
 
@@ -867,7 +894,7 @@ If interleaved: A holds L1, waits for L2; B holds L2, waits for L1. Stuck.
 3. No preemption (locks can't be forcibly taken).
 4. Circular wait (cycle in lock dependency graph).
 
-**Prevention:** break one of the four conditions. Most common in practice is killing circular wait via a global lock order (the lock hierarchy detailed in §4) — always acquire locks in the same defined order.
+**Prevention:** break one of the four conditions. Most common in practice is killing circular wait via a global lock order (the lock hierarchy detailed in section 4) — always acquire locks in the same defined order.
 
 **Detection:** Java has built-in deadlock detection. Many systems log "deadlock detected; aborting transaction X" — the DB picks a victim to abort.
 
@@ -916,7 +943,7 @@ Eliminate the gap by acting on a handle, not a path: `open()` first (with `O_NOF
 
 ### False Sharing
 
-Two variables in the same cache line, modified by different cores, cause cache-line thrashing even though the variables are logically independent. It's a *performance* hazard, not a correctness one. Mechanism, example, and the `_Alignas(64)` fix are in §2 (Cache Coherence) — listed here only so the hazard appears alongside its peers.
+Two variables in the same cache line, modified by different cores, cause cache-line thrashing even though the variables are logically independent. It's a *performance* hazard, not a correctness one. Mechanism, example, and the `_Alignas(64)` fix are in section 2 (Cache Coherence) — listed here only so the hazard appears alongside its peers.
 
 ---
 
@@ -941,7 +968,7 @@ pthread_create(&t1, NULL, reader, NULL);
 pthread_create(&t2, NULL, reader, NULL);
 ```
 
-C has no built-in reference counting, so immutable sharing means either static/long-lived data (as above) or a hand-rolled atomic refcount when lifetime is dynamic. Functional languages lean heavily on this; persistent data structures (Hash Array Mapped Tries, RRB-vectors) provide "modified" versions cheaply without copying.
+C has no built-in reference counting, so immutable sharing means either static/long-lived data (as above) or a hand-rolled atomic refcount when lifetime is dynamic. Functional languages lean heavily on this; persistent data structures (Hash Array Mapped Tries, relaxed-radix-balanced (RRB) vectors) provide "modified" versions cheaply without copying.
 
 ### Read-Copy-Update (RCU)
 

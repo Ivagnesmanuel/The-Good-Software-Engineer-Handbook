@@ -1,6 +1,6 @@
 # Networking Fundamentals
 
-A quick-reference guide covering networking's core concepts.
+A reference handbook covering networking from the link layer up through application protocols.
 
 ---
 
@@ -39,7 +39,7 @@ Networking is organized into layers, each solving one piece of the communication
 
 ### TCP/IP Model (what the Internet actually uses)
 
-The TCP/IP model collapses the top three OSI layers into a single Application layer, and the bottom two into a Network Access layer. Know OSI for interviews, use TCP/IP for real thinking.
+The TCP/IP model collapses the top three OSI layers into a single Application layer, and the bottom two into a Network Access layer. OSI provides the finer-grained shared vocabulary; TCP/IP describes how the stack is actually implemented.
 
 ```
   OSI                TCP/IP
@@ -141,11 +141,11 @@ An HTTP GET request traveling down the stack. Each layer treats everything above
 - Each layer only reads its own header. A router (L3 device) strips the frame header, reads the IP header, makes a routing decision, and re-encapsulates in a new frame for the next hop.
 - Headers are added at the front (**headers**), trailers at the end (**trailers**). The CRC (Cyclic Redundancy Check) in Ethernet is a trailer. Most layers only add headers.
 - This is exactly what Wireshark displays — nested layers that can be expanded one by one.
-- The total overhead of all headers is why a 1500-byte Ethernet MTU carries only ~1460 bytes of TCP payload: 20 bytes consumed by IP, 20 by TCP.
+- The total overhead of all headers is why a 1500-byte Ethernet MTU (Maximum Transmission Unit) carries only ~1460 bytes of TCP payload: 20 bytes consumed by IP, 20 by TCP.
 
 ### What happens when you type a URL
 
-The most common networking interview question. The full sequence, layer by layer:
+A complete end-to-end walkthrough that exercises most of the stack. The full sequence, layer by layer:
 
 ```
   Browser                                              Server
@@ -170,7 +170,7 @@ The most common networking interview question. The full sequence, layer by layer
     |    6. Render page                                  |
 ```
 
-> **Interview tip:** structure the answer through the layers — DNS resolution, TCP handshake, TLS handshake, HTTP request, response parsing. Mentioning ARP, routing, and frame-level delivery demonstrates additional depth.
+> The walkthrough is naturally organized by layer — DNS resolution, TCP handshake, TLS handshake, HTTP request, response parsing — with ARP, routing, and frame-level delivery underpinning it at the link layer.
 
 ---
 
@@ -194,7 +194,7 @@ The data link layer handles delivery across a single link (one hop). It deals wi
 
 48-bit hardware identifiers burned into NICs (Network Interface Cards), written in hex: `aa:bb:cc:dd:ee:ff`. Globally unique per interface. Used only for **local delivery** within a LAN segment.
 
-We cannot change the physical MAC Address but we can change the virtual MAC Address.
+The burned-in address is fixed, but the address an interface *presents on the wire* can be overridden in software (MAC spoofing) — the OS simply puts a different value in the frame's source field.
 
 **Key insight:** source and destination MAC addresses are **rewritten at every router hop**, while IP addresses stay the same end-to-end.
 
@@ -286,7 +286,7 @@ Three fundamental modes of IP communication:
 
 Broadcasts are confined to the local subnet — routers do not forward them (this boundary is called the **broadcast domain**). Protocols that use broadcast: ARP, DHCP Discover/Request. Excessive broadcasts degrade network performance, which is one reason to use VLANs to keep broadcast domains small.
 
-> **IPv6 has no broadcast.** It uses multicast and a new concept called **anycast** instead.
+> **IPv6 has no broadcast.** Its replacement is **multicast** — for example the all-nodes group `ff02::1` does the job broadcast did in IPv4. (**Anycast** — one-to-nearest, where the same address is announced from many locations and routing picks the closest — also exists in IPv6, but it predates IPv6 and is a separate addressing mode, not the broadcast replacement.)
 
 **Multicast** — one-to-many (subscribers only). A packet is sent to a **group address** and delivered only to hosts that have joined that group. Uses the IP range `224.0.0.0/4` (224.0.0.0 – 239.255.255.255) in IPv4.
 
@@ -295,9 +295,9 @@ Broadcasts are confined to the local subnet — routers do not forward them (thi
                      (not everyone)
 ```
 
-Hosts join/leave groups using IGMP (Internet Group Management Protocol). Multicast is efficient for streaming video to many viewers, service discovery (mDNS uses `224.0.0.251`), and cluster coordination. Multicast-capable routers and switches are required — on the public Internet it's rarely available, but within datacenters and enterprise LANs it's common.
+Hosts join/leave groups using IGMP (Internet Group Management Protocol). Multicast is efficient for streaming video to many viewers, service discovery (mDNS — multicast DNS — uses `224.0.0.251`), and cluster coordination. Multicast-capable routers and switches are required — on the public Internet it's rarely available, but within datacenters and enterprise LANs it's common.
 
-**Anycast** — one-to-nearest. Multiple hosts share the same IP address, and the network routes packets to the **topologically closest** one based on routing metrics. Implemented via BGP. Used by CDNs (Content Delivery Networks), DNS root servers, and services like Cloudflare (`1.1.1.1`) and Google DNS (`8.8.8.8`).
+**Anycast** — one-to-nearest. Multiple hosts share the same IP address, and the network routes packets to the **topologically closest** one based on routing metrics. Implemented via BGP (Border Gateway Protocol). Used by CDNs (Content Delivery Networks), DNS root servers, and services like Cloudflare (`1.1.1.1`) and Google DNS (`8.8.8.8`).
 
 ```
   Client  ---------> Nearest server   Multiple servers share one IP,
@@ -328,9 +328,9 @@ Hosts join/leave groups using IGMP (Internet Group Management Protocol). Multica
 
 ### IPv6
 
-128-bit addresses written in hex: `2001:db8::1`. Solves IPv4 address exhaustion, simplifies the header (no checksum, no router fragmentation). ~45% of Google traffic is IPv6 as of 2025. Dual-stack (v4 + v6) is the standard transition strategy.
+128-bit addresses written in hex: `2001:db8::1`. Solves IPv4 address exhaustion, simplifies the header (no checksum, no router fragmentation). IPv6 now carries a large and growing share of Internet traffic; dual-stack (v4 + v6) is the standard transition strategy.
 
-Key differences from IPv4: no broadcast (uses multicast instead), no NAT needed (enough addresses for every device), mandatory IPsec support, simplified header (fixed 40 bytes, no options field, no header checksum).
+Key differences from IPv4: no broadcast (uses multicast instead), no NAT needed (enough addresses for every device), recommended (not mandatory) IPsec (IP Security) support — originally required, relaxed to SHOULD by RFC 6434, simplified header (fixed 40 bytes, no options field, no header checksum).
 
 ### CIDR (Classless Inter-Domain Routing) and Subnetting
 
@@ -345,7 +345,7 @@ CIDR replaced the old Class A/B/C system. Addresses are `IP/prefix_length`, allo
 |`/28`|255.255.255.240|16|14|Small server subnet|
 |`/26`|255.255.255.192|64|62|Department LAN|
 |`/24`|255.255.255.0|256|254|Standard LAN|
-|`/20`|255.255.240.0|4,096|4,094|VPC subnet (AWS default)|
+|`/20`|255.255.240.0|4,096|4,094|VPC (Virtual Private Cloud) subnet (AWS default)|
 |`/16`|255.255.0.0|65,536|65,534|Large VPC|
 |`/8`|255.0.0.0|16.7M|16.7M|Private class A|
 
@@ -664,7 +664,7 @@ Customer (AS 200)   Peer (AS 300)
 | **Algorithm**       | Dijkstra (SPF)           | Best path selection (policy-driven)    |
 | **Convergence**     | Fast (seconds)           | Slow (minutes)                         |
 | **Transport**       | IP protocol 89           | TCP port 179                           |
-| **Scalability**     | Medium (areas help)      | Massive (Internet-scale, 900k+ routes) |
+| **Scalability**     | Medium (areas help)      | Massive (Internet-scale, hundreds of thousands of routes) |
 | **Loop prevention** | Topology knowledge       | AS_PATH loop detection                 |
 | **Primary use**     | Enterprise, ISP internal | Internet routing, multi-AS             |
 
@@ -790,14 +790,7 @@ Reliable, ordered, byte-stream delivery. Turns unreliable IP into a pipe applica
 - **PSH** — push data to application promptly
 - **URG** — urgent pointer is valid
 
-#### Common flag combinations
-
-- `SYN` — client starts handshake
-- `SYN-ACK` — server replies
-- `ACK` — handshake completed / normal acknowledgment
-- `PSH-ACK` — data packet
-- `FIN-ACK` — graceful shutdown
-- `RST` — abort / refused connection
+The handshake and teardown combinations (`SYN`, `SYN-ACK`, `ACK`, `FIN-ACK`) are shown in the diagrams below. Two other common combinations: `PSH-ACK` is an ordinary data-carrying segment, and a bare `RST` aborts or refuses a connection.
 
 #### Three-Way Handshake
 
@@ -827,13 +820,13 @@ Costs **1 RTT (Round-Trip Time)** before data flows. Add TLS 1.3 (another RTT) =
     |  A enters TIME_WAIT (~60s)     |
 ```
 
-**TIME_WAIT** holds the socket to handle delayed duplicates. On busy servers, thousands of TIME_WAIT sockets can exhaust ephemeral ports. Tunable via `net.ipv4.tcp_tw_reuse` on Linux.
+**TIME_WAIT** is entered by the side that sends the first FIN (the active closer) and lasts **2×MSL** (Maximum Segment Lifetime, ~60s on Linux), for two reasons: (1) let delayed duplicate segments from this connection expire before the 4-tuple is reused, and (2) allow the final ACK to be retransmitted if the peer re-sends its FIN. On busy servers thousands of TIME_WAIT sockets can exhaust ephemeral ports; tunable via `net.ipv4.tcp_tw_reuse` on Linux (safe for outbound connections only).
 
 #### Reliability
 
 TCP retransmits lost segments, detected by **timeout** or **3 duplicate ACKs** (fast retransmit). The RTO (Retransmission Timeout) adapts dynamically to measured RTT.
 
-**SACK (Selective Acknowledgment):** the receiver reports exactly which byte ranges it has, so only truly lost segments are retransmitted. Without SACK, TCP falls back to Go-Back-N (retransmit everything from the lost segment onward).
+**SACK (Selective Acknowledgment):** the receiver reports exactly which byte ranges it has, so the sender retransmits only the truly missing ranges. Without SACK the sender has less information: fast retransmit still resends just the one segment the duplicate ACKs point to, but a full **retransmission timeout** forces it to resume from the last cumulatively-acknowledged byte and resend everything after it (the Go-Back-N-style behavior), since it cannot tell which later segments actually arrived.
 
 #### Flow Control
 
@@ -857,7 +850,7 @@ TCP regulates sending rate to avoid collapsing the network. The sender maintains
    +--------------------------------> time
 ```
 
-1. **Slow start:** cwnd starts at 1 MSS, doubles every RTT (exponential) until ssthresh or loss.
+1. **Slow start:** cwnd starts at the initial window (classically 1 MSS; modern stacks use ~10 MSS, RFC 6928) and doubles every RTT (exponential) until ssthresh or loss.
 2. **Congestion avoidance:** cwnd grows by 1 MSS per RTT (linear).
 3. **On timeout:** ssthresh = cwnd/2, cwnd = 1, back to slow start.
 4. **On 3 dup ACKs (fast recovery):** ssthresh = cwnd/2, cwnd = ssthresh, stay linear.
@@ -909,6 +902,7 @@ Key advantages over TCP+TLS:
 - **Built-in TLS 1.3:** encryption is mandatory, not optional.
 - **Faster setup:** 1 RTT (0-RTT on resumption) vs. 2-3 RTTs for TCP+TLS.
 - **Connection migration:** survives IP changes (e.g., WiFi to cellular).
+- **QPACK header compression:** HTTP/3's equivalent of HTTP/2's HPACK, redesigned so that header-table updates cannot stall when QUIC delivers streams out of order.
 
 ```
   TCP + TLS 1.3 (2 RTTs):           QUIC (1 RTT, 0-RTT on resumption):
@@ -936,7 +930,7 @@ The protocol of the web and the dominant API transport.
 |---|---|---|---|
 |HTTP/1.1|TCP|Keep-alive, chunked encoding|1 request at a time per connection (HOL blocking)|
 |HTTP/2|TCP|Binary framing, multiplexed streams, HPACK header compression|TCP-level HOL blocking on packet loss|
-|HTTP/3|QUIC (UDP)|Per-stream loss recovery, 0-RTT, built-in TLS 1.3|UDP sometimes blocked by networks|
+|HTTP/3|QUIC (UDP)|Per-stream loss recovery, 0-RTT, built-in TLS 1.3, QPACK header compression|UDP sometimes blocked by networks|
 
 **HTTP request/response structure:**
 
@@ -949,7 +943,7 @@ The protocol of the web and the dominant API transport.
                                    {"users": [...]}
 ```
 
-**HTTP methods:** GET (read), POST (create), PUT (replace), PATCH (partial update), DELETE (remove), HEAD (metadata only), OPTIONS (CORS preflight).
+**HTTP methods:** GET (read), POST (create), PUT (replace), PATCH (partial update), DELETE (remove), HEAD (metadata only), OPTIONS (CORS — Cross-Origin Resource Sharing — preflight).
 
 **Status codes to know:**
 
@@ -959,6 +953,8 @@ The protocol of the web and the dominant API transport.
 - 5xx: server error (500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout)
 
 ### TLS (Transport Layer Security) — Deep Dive
+
+This section treats TLS from the transport angle: the handshake as a sequence of round trips, the version differences that drive connection-setup latency, and how TLS is deployed and terminated in production. The complementary view — how the underlying primitives (AEAD ciphers, ECDHE, the HKDF key schedule) compose to provide the guarantees below — belongs to applied cryptography and is developed as a case study in `Cryptography.md`.
 
 TLS encrypts the communication channel between two parties, providing three guarantees: **confidentiality** (the data cannot be read by third parties), **integrity** (the data cannot be modified undetected), and **authentication** (the remote party is who it claims to be).
 
@@ -972,6 +968,8 @@ TLS encrypts the communication channel between two parties, providing three guar
 
 #### TLS 1.3 handshake in detail
 
+Each side sends a **Diffie-Hellman (DH) key share** in its first message; the two shares combine into a shared secret that neither could derive alone, from which the session keys are derived.
+
 ```
   Client                                     Server
     |                                          |
@@ -980,9 +978,11 @@ TLS encrypts the communication channel between two parties, providing three guar
     |   - key share (client's DH public key)   |
     |   - supported TLS versions               |
     |                                          |
-    |<<- ServerHello + EncryptedExtensions ----|
+    |<<- ServerHello --------------------------|
     |   - chosen cipher suite                  |
     |   - key share (server's DH public key)   |
+    |   --- everything below is encrypted ---  |
+    |   - EncryptedExtensions                  |
     |   - server certificate                   |
     |   - certificate verify (signature)       |
     |   - finished (MAC of handshake)          |
@@ -993,8 +993,10 @@ TLS encrypts the communication channel between two parties, providing three guar
     |-- Finished ---------------------------->>|
     |   (MAC of handshake)                     |
     |                                          |
-    |<<========== encrypted data ===========>>=|
+    |<<========== encrypted data ============>>|
 ```
+
+Unlike TLS 1.2, everything after the ServerHello — including the server's certificate — is encrypted under keys derived during this handshake, so an on-path observer cannot see which certificate the server presents.
 
 **Key exchange:** TLS 1.3 exclusively uses ephemeral Diffie-Hellman (ECDHE — Elliptic Curve Diffie-Hellman Ephemeral). Every connection generates fresh keys, providing **forward secrecy** — if the server's private key is compromised later, past sessions can't be decrypted.
 
@@ -1013,12 +1015,12 @@ TLS encrypts the communication channel between two parties, providing three guar
 - **mTLS (mutual TLS):** both sides present certificates. The server verifies the client's certificate too. Standard in service mesh (Istio, Linkerd) and zero-trust architectures. Used to authenticate service-to-service communication.
 - **Certificate pinning:** the client only trusts specific certificates (not any CA-signed cert). Used in mobile apps for extra security. Makes rotation harder — use with care.
 - **Certificate transparency (CT):** public logs of all issued certificates. Enables detection of unauthorized certificates issued for a domain.
-- **SNI (Server Name Indication):** TLS extension where the client specifies which hostname it's connecting to. Required for virtual hosting (multiple HTTPS sites on one IP). Sent in plaintext in TLS 1.2 — encrypted in TLS 1.3 via ECH (Encrypted Client Hello).
+- **SNI (Server Name Indication):** TLS extension where the client specifies which hostname it's connecting to. Required for virtual hosting (multiple HTTPS sites on one IP). The SNI rides in the ClientHello and is sent in plaintext in **both TLS 1.2 and TLS 1.3** — an on-path observer still sees the destination hostname. **ECH (Encrypted Client Hello)** is a separate, optional extension that encrypts the whole ClientHello including SNI; it needs support on both ends and is not yet widely deployed.
 - **HSTS (HTTP Strict Transport Security):** response header telling browsers to always use HTTPS for the domain. Prevents SSL-stripping MITM attacks.
 
 ### WebSocket
 
-WebSocket is a protocol for **persistent, full-duplex communication over a single TCP connection**. Unlike HTTP’s request/response model, both client and server can send messages **at any time** after the connection is established.
+WebSocket is a protocol for **persistent, full-duplex communication over a single TCP connection**. Unlike HTTP's request/response model, both client and server can send messages **at any time** after the connection is established.
 
 Defined in **RFC 6455**. Typically runs over:
 - `ws://` → WebSocket over TCP
@@ -1061,16 +1063,19 @@ After this, the connection is **no longer HTTP** — it becomes raw WebSocket fr
 Communication happens through **frames**.
 
 ```
-0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
-+---------------+---------------+
-| FIN | OPCODE  | MASK | LENGTH |
-+---------------+---------------+
-|     Payload length (extended) |
-+-------------------------------+
-| Masking key (client -> srv)   |
-+-------------------------------+
-| Payload data                  |
-+-------------------------------+
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5   <- bit, within the first 2 bytes
++-+-+-+-+-------+-+-------------+
+|F|R|R|R|opcode |M| payload len |   F=FIN, R=RSV1-3, M=MASK
+|I|S|S|S| (4b)  |A|    (7b)     |
+|N|V|V|V|       |S|             |
+| |1|2|3|       |K|             |
++-+-+-+-+-------+-+-------------+
+| extended payload length (if len == 126 or 127)  |
++--------------------------------------------------+
+| masking key, 4 bytes (only if MASK = 1)          |
++--------------------------------------------------+
+| payload data                                     |
++--------------------------------------------------+
 ```
 
 Important fields:
@@ -1219,7 +1224,7 @@ Options include:
 |Method|Notes|
 |---|---|
 |Cookie session|works for browser apps|
-|JWT in query param|common but visible in logs|
+|JWT (JSON Web Token) in query param|common but visible in logs|
 |JWT in `Authorization` header|preferred|
 |Auth during HTTP upgrade|most secure|
 
@@ -1383,8 +1388,9 @@ Metadata is used for:
 #### Deadlines and Cancellation
 
 Clients can set **deadlines** to avoid hanging requests.
-```
-context.WithTimeout(ctx, 200ms)
+```go
+ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+defer cancel()
 ```
 
 If the server doesn't respond in time:
@@ -1401,7 +1407,7 @@ gRPC supports multiple balancing strategies:
 |---|---|
 |Pick-first|First healthy backend|
 |Round-robin|Simple rotation|
-|xDS|Advanced service mesh config|
+|xDS|Advanced service mesh config (the Envoy discovery-service API family)|
 
 In Kubernetes, common setups are:
 ```
@@ -1475,11 +1481,11 @@ Less ideal for:
 |---|---|---|---|
 |Transport|HTTP/1.1 or HTTP/2|HTTP|HTTP/2|
 |Data format|JSON (text)|JSON (text)|Protobuf (binary)|
-|Schema|OpenAPI/Swagger (optional)|Required (SDL)|Required (.proto files)|
+|Schema|OpenAPI/Swagger (optional)|Required (SDL — Schema Definition Language)|Required (.proto files)|
 |Streaming|Limited (SSE, WebSocket)|Subscriptions (via WS)|Native bidirectional streaming|
 |Overfetching|Common (fixed responses)|Solved (client picks fields)|N/A (defined per method)|
 |Browser support|Native|Native|Needs grpc-web proxy|
-|Best for|Public APIs, web apps|Flexible queries, BFF|Internal microservices, perf-critical|
+|Best for|Public APIs, web apps|Flexible queries, BFF (Backend-for-Frontend)|Internal microservices, perf-critical|
 
 ---
 
@@ -1543,7 +1549,7 @@ NAT allows devices with private IP addresses to communicate with the public Inte
 |**PAT (Port Address Translation)**|Maps many private IPs to one public IP using different ports|Home routers, cloud NAT gateways|
 |**1:1 NAT**|Maps one private IP to one public IP|Servers that need a dedicated public IP|
 
-Most consumer and cloud NAT is **PAT** (also called "NAT overload" or "NAPT").
+Most consumer and cloud NAT is **PAT** (also called "NAT overload" or "NAPT" — Network Address Port Translation).
 
 #### How PAT works
 
@@ -1570,9 +1576,9 @@ Most consumer and cloud NAT is **PAT** (also called "NAT overload" or "NAPT").
     - **ICE (Interactive Connectivity Establishment):** tries STUN first, falls back to TURN. Used by WebRTC.
 - **UDP mapping timeout:** NAT entries for UDP expire fast (~30 seconds). Long-lived UDP flows (VoIP, gaming, VPN) need periodic keepalive packets.
 - **TCP mapping timeout:** longer (~minutes), but idle connections can still be dropped. TCP keepalive helps.
-- **Protocols with embedded IPs:** SIP, FTP active mode, and some gaming protocols embed IP addresses in the payload. NAT doesn't rewrite payloads, so these break without an ALG (Application Level Gateway).
+- **Protocols with embedded IPs:** SIP (Session Initiation Protocol), FTP active mode, and some gaming protocols embed IP addresses in the payload. NAT doesn't rewrite payloads, so these break without an ALG (Application Level Gateway).
 - **Cloud NAT layers:** in AWS/GCP/Azure, the path is often: instance private IP -> VPC subnet -> NAT gateway -> public IP. Each layer has its own mapping table and timeouts.
-- **Port exhaustion:** 16-bit port field = ~65K mappings per public IP. High-traffic NAT gateways can exhaust this, causing connection failures. Solution: add more public IPs.
+- **Port exhaustion:** the 16-bit port field gives ~65K source ports. Because PAT keys each mapping on the full tuple (public IP, destination IP, destination port, protocol), the ~65K ceiling is *per distinct destination*, not a flat per-public-IP cap — but many clients hitting the same popular destination (e.g. one busy server) still contend for that one bucket. High-traffic NAT gateways can exhaust it, causing connection failures. Solution: add more public IPs.
 - **Hairpin NAT:** when a host behind NAT tries to access another host behind the same NAT using the public IP. Not all NAT implementations support this — can cause confusing connectivity issues.
 
 ### DNS (Domain Name System) 
@@ -1588,7 +1594,7 @@ DNS translates human-readable names (example.com) to IP addresses (93.184.216.34
 | **CNAME** | Alias to another name                    | `www.example.com. → example.com.`            |
 | **MX**    | Mail server for domain                   | `example.com. → 10 mail.example.com.`        |
 | **NS**    | Authoritative nameserver                 | `example.com. → ns1.example.com.`            |
-| **TXT**   | Arbitrary text (SPF, DKIM, verification) | `example.com. → "v=spf1 include:..."`        |
+| **TXT**   | Arbitrary text (email-auth records SPF and DKIM, domain verification) | `example.com. → "v=spf1 include:..."`        |
 | **SRV**   | Service discovery (host + port)          | `_sip._tcp.example.com. → server:5060`       |
 | **PTR**   | Reverse lookup (IP → name)               | `34.216.184.93.in-addr.arpa. → example.com.` |
 | **SOA**   | Zone authority, serial, timers           | Metadata about the zone                      |
@@ -1634,9 +1640,11 @@ DNS caching happens at **multiple levels:**
 4. **Authoritative server cache:** sometimes caches responses from upstream. 
 
 **Negative caching:** NXDOMAIN (non-existent domain) responses are cached too, controlled by the SOA record's negative TTL. Prevents repeated lookups for typos.
-**Cache poisoning:** Attackers inject fake DNS responses into resolver caches. Mitigations: DNSSEC (cryptographic signatures), randomized query IDs, source port randomization.
+**Cache poisoning:** Attackers inject fake DNS responses into resolver caches. Mitigations: DNSSEC (Domain Name System Security Extensions — cryptographic signatures on records), randomized query IDs, source port randomization.
 
 #### Common DNS Tools and Examples
+
+The command-line invocations and output parsing for these tools are covered in more depth in `Networking linux-commands.md`; this section focuses on what the queries reveal about DNS itself.
 
 **`dig` (domain information groper) — the standard DNS query tool**
 
@@ -1699,8 +1707,8 @@ $ dig -x 93.184.216.34
 
 **CNAME at apex:** You **cannot** have a CNAME at the zone apex (bare domain). This breaks DNS:
 ```
-❌ example.com.  CNAME  other.com.   # Invalid! Breaks MX, NS, SOA
-✅ www.example.com.  CNAME  example.com.  # Valid
+Invalid:  example.com.      CNAME  other.com.     # breaks MX, NS, SOA at the apex
+Valid:    www.example.com.  CNAME  example.com.
 ```
 **Solution:** Use A/AAAA records at apex, or services like Cloudflare's "CNAME flattening" or AWS Route 53's Alias records.
 

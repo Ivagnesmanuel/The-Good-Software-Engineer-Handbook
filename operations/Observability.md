@@ -1,6 +1,6 @@
 # Observability
 
-A quick-reference guide covering how to know what a running system is doing: the three pillars (metrics, logs, traces), the discipline of SLOs and error budgets, the methods (USE, RED) for reasoning about resources and services, alerting, dashboards, and SRE practice.
+A quick-reference guide covering how to know what a running system is doing: the three pillars (metrics, logs, traces), the discipline of SLOs and error budgets, the methods (USE, RED) for reasoning about resources and services, alerting, dashboards, and SRE (Site Reliability Engineering) practice.
 
 This is the operational, production-facing companion to `Performance Optimization.md`. Where that document covers how to *make code fast* (memory hierarchy, data layout, compilers), this one covers how to *see what production is doing* and operate it reliably. The two overlap at profiling and latency — handled here from the observation angle, with cross-references to the engineering treatment.
 
@@ -109,6 +109,8 @@ Logs (per service):        What was the actual error? What was the input?
 
 Modern platforms (Datadog, Honeycomb, Grafana stack, New Relic) link them: from a metric spike, click through to traces; from a trace, click through to logs for that request.
 
+The metric→trace jump is made concrete by **exemplars**: a histogram bucket carries a few example trace IDs of requests that landed in it, so a click on a latency spike opens an actual slow trace rather than a guess. OpenTelemetry and Prometheus both support them.
+
 ---
 
 ## 3. Metrics in Depth
@@ -122,6 +124,8 @@ http_requests_total{status="200"} = 12,453
 ```
 
 Query as a rate: `rate(http_requests_total[5m])` → requests per second.
+
+`rate()` and `increase()` both account for counter resets (a process restart drops the counter to zero); `rate()` yields per-second, `increase()` the total over the range. Never alert on a counter's raw value — alert on its rate.
 
 **Gauge:** instantaneous value that can go up or down.
 
@@ -149,6 +153,8 @@ Used for percentiles, averages, distributions. Buckets are pre-defined.
 
 Histograms are the standard modern choice — server-side aggregation enables cross-instance percentiles.
 
+**Percentiles do not average.** `avg(p99)` across instances — or across time buckets — is statistically meaningless: the mean of per-instance p99s is neither the fleet p99 nor any other percentile. Correct aggregation sums the raw histogram buckets first, then computes the quantile over the summed buckets (`histogram_quantile(0.99, sum(rate(..._bucket[5m])) by (le))`). The result is an interpolation bounded by the bucket edges, so quantile accuracy is only as good as the bucket layout. This is why histograms, not client-side summaries, are required wherever percentiles must hold across instances.
+
 ### Cardinality
 
 The number of unique label combinations for a metric.
@@ -172,9 +178,11 @@ Application metrics       /metrics endpoint scraped by Prometheus
 System metrics            node_exporter, cAdvisor, fluent-bit, etc.
 Cloud metrics             CloudWatch, GCP Cloud Monitoring, Azure Monitor
 Database metrics          Postgres pg_stat_statements, MySQL performance_schema
-Network metrics           ipt netfilter, eBPF
+Network metrics           ipt netfilter, eBPF (extended Berkeley Packet Filter)
 Custom business metrics   "orders_completed_total{plan='pro'}"
 ```
+
+Database-specific operational signals (connection-pool saturation, replication-lag budget, vacuum/bloat, per-template query latency) are detailed in `Data Systems.md`.
 
 ### Prometheus Model
 
@@ -186,8 +194,8 @@ The de-facto standard for metrics in cloud-native.
 - **Alertmanager:** evaluates alert rules, deduplicates, routes notifications.
 
 ```promql
-# Requests per second by endpoint
-rate(http_requests_total[5m]) by (path)
+# Requests per second by endpoint (summed across instances)
+sum by (path) (rate(http_requests_total[5m]))
 
 # p99 latency
 histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
@@ -260,7 +268,7 @@ Significant state changes
 
 ```
 Passwords, tokens, credit card numbers, API keys (even on error paths!)
-Full PII unless required and audited
+Full PII (personally identifiable information) unless required and audited
 Full request/response bodies for sensitive endpoints
 Inside hot loops (one log per millisecond = millions per day)
 ```
@@ -354,7 +362,7 @@ The SDK propagates trace context across service boundaries via HTTP headers (`tr
 
 Capturing every span is expensive. Sample.
 
-- **Head-based sampling:** decide at the start of the trace (e.g., 1% of requests). Simple, biased toward fast paths.
+- **Head-based sampling:** decide at the start of the trace (e.g., keep 1% uniformly at random). Simple and cheap, but outcome-blind — it cannot preferentially retain errors or slow traces, so rare tail events are usually under-sampled.
 - **Tail-based sampling:** decide at the end (after seeing the full trace). Can keep all errors, all slow traces, sample the rest. More useful but requires holding traces in memory until decision.
 
 Honeycomb's Refinery and the OTel Collector's tail-sampling processor implement tail-based sampling.
@@ -366,11 +374,11 @@ Honeycomb's Refinery and the OTel Collector's tail-sampling processor implement 
 | Jaeger | Open source, mature, good UI |
 | Tempo | Grafana's trace backend, integrates with Loki/Prometheus |
 | Zipkin | The original, still in use |
-| Datadog APM | Commercial, integrated metrics/logs/traces |
+| Datadog APM (Application Performance Monitoring) | Commercial, integrated metrics/logs/traces |
 | Honeycomb | Best for high-cardinality analysis |
 | New Relic | Commercial, broad |
 | AWS X-Ray | AWS-native |
-| Lightstep / ServiceNow Cloud Observability | Commercial |
+| Lightstep | Commercial |
 
 ### When Tracing Helps
 
@@ -386,6 +394,8 @@ When it doesn't help: monolith with no cross-service calls (logs and profiling a
 ## 6. SLI / SLO / SLA / Error Budgets
 
 The Google SRE framework for setting reliability targets.
+
+The design-altitude treatment — choosing reliability targets as a system-design constraint, and how internal SLOs are set tighter than external SLAs to preserve headroom — is in `System Design.md`. This section owns the operational mechanics: SLI selection, error-budget policy, and burn-rate alerting.
 
 ### Definitions
 
@@ -420,11 +430,11 @@ Common SLIs:
 
 - **Availability:** fraction of requests that succeed.
 - **Latency:** fraction of requests under threshold (e.g., p99 < 300ms).
-- **Throughput:** lower bound on QPS.
+- **Throughput:** lower bound on QPS (queries per second; also written RPS, requests per second, or req/s).
 - **Quality:** fraction of "good" responses (no fallback, no degraded mode).
 - **Freshness:** for derived data, max age (data is at most 5 min stale).
 
-The wrong SLI ("CPU usage < 80%") tracks a means, not an end. Users don't care about CPU. They care about whether the app responds.
+The wrong SLI ("CPU usage < 80%") tracks a means, not an end: users do not experience CPU utilization, only whether the application responds.
 
 ### SLO Window
 
@@ -459,12 +469,12 @@ For every resource (CPU, memory, disk, network), measure:
 
 ```
 CPU:       Utilization (%) | Saturation (run queue len, load avg) | Errors (rare)
-Memory:    Used / Total    | Swap usage, page faults              | OOMs
+Memory:    Used / Total    | Swap usage, page faults              | OOMs (out-of-memory kills)
 Disk:      I/O utilization | I/O wait time, queue depth           | I/O errors
 Network:   Bandwidth used  | Drop counters, retransmits           | Frame errors
 ```
 
-USE is a checklist when investigating a host. Each line is a question; missing data indicates incomplete observability.
+USE is a checklist when investigating a host. Each line is a question; missing data indicates incomplete observability. The bottleneck-identification rule (high utilization with high saturation) is in `Performance Optimization.md`.
 
 ### RED — for Services
 
@@ -517,7 +527,7 @@ Alerts wake people up. Each alert is a cost — to the alerted human, to the tea
 - "Free disk < 20%"       (in many cases, not an incident)
 - "Restarted again"       (informational, not actionable)
 - Flapping                (fires and clears repeatedly)
-- Inverted                (clears at 80%, fires at 85% — fires twice during normal recovery)
+- Inverted                (fires at 80%, clears at 85% — clear set above fire, so it re-fires during recovery)
 ```
 
 ### Alert Fatigue
@@ -537,16 +547,21 @@ For SLO-driven alerting: page when the budget is being consumed faster than a de
 
 ```
 For an SLO of 99.9% over 28 days:
-  Sustained 14.4x burn rate exhausts budget in 2 hours.
-  Sustained 1x burn rate exhausts in exactly 28 days.
+  Sustained 14.4x burn rate exhausts the budget in ~2 days (28 days / 14.4 ≈ 47 h);
+            over a 1-hour window it burns ~2% of the budget.
+  Sustained 1x burn rate exhausts it in exactly 28 days (by definition).
 
-Page if:
-  Last 1h has 14.4x burn rate AND last 5m has 14.4x burn rate.
+Page if (fast burn):
+  Last 1h burn rate >= 14.4 AND last 5m  burn rate >= 14.4.   (sudden, severe burns)
+Page if (slow burn):
+  Last 6h burn rate >= 6    AND last 30m burn rate >= 6.      (gradual leaks a
+                                          fast-burn-only alert would never catch)
 
-(Two-window: avoid pager on a transient spike that's already over.)
+(The short second window confirms the burn is still happening, so the page
+ clears quickly once a transient spike is over.)
 ```
 
-Google's SRE book has the detailed math.
+Pairing a fast and a slow tier is the multi-window, multi-burn-rate pattern: the fast tier catches outages, the slow tier catches steady erosion of the budget.
 
 ### Runbooks
 
@@ -666,7 +681,7 @@ Common patterns that jump out of a production profile:
 - **Hot lock contention:** time in `sync_lock_acquire` / `futex`.
 - **Excessive allocation:** `mallocgc`, `malloc`, `tcmalloc` near the top.
 - **Slow syscalls:** `read`, `write` (`epoll_wait` at the top is usually fine — it's just waiting).
-- **Reflection / serialization:** JSON marshaling, reflection-heavy ORMs.
+- **Reflection / serialization:** JSON marshaling, reflection-heavy ORMs (object-relational mappers).
 - **Compression:** gzip/zlib at the top means too much compression on the hot path.
 
 Once the hot spot is located, the *fix* is an optimization problem — see `Performance Optimization.md`.
@@ -675,13 +690,13 @@ Once the hot spot is located, the *fix* is an optimization problem — see `Perf
 
 ## 11. Latency Tail and p99 Thinking
 
-The hardest part of latency is the long tail. This section is about *observing and reasoning about* the tail; for the causes (queueing, Little's Law) and engineering techniques to reduce it (hedged requests, headroom, bounded queues), see `Performance Optimization.md`.
+The hardest part of latency is the long tail. This section is about *observing and reasoning about* the tail; for the causes (queueing, Little's Law) and engineering techniques to reduce it (hedged requests, headroom, bounded queues), see `Performance Optimization.md`. The fan-out / tail-amplification view at the design altitude is in `System Design.md`.
 
 ```
 Service A:  p50 = 50ms, p99 = 200ms, p999 = 5s
 ```
 
-p50 appears excellent. But for a page that makes 10 parallel calls to A, the probability that all 10 return within 200ms is `0.99^10 = 90.4%`. **10% of pages experience the p99 of A.**
+p50 appears excellent. But for a page that makes 10 parallel calls to A, the probability that all 10 return within 200ms is `0.99^10 = 90.4%`. So **~10% of pages experience the p99 of A or worse** — the slowest of the 10 calls is at least A's p99.
 
 ```
 Probability that user sees > Tservice:
@@ -773,6 +788,14 @@ Good load test:
 - Distributed source (not just one machine).
 - Warm-up phase before measurement.
 
+### Open vs Closed Model, and Coordinated Omission
+
+Closed model: a fixed pool of virtual users, each issuing the next request only after the previous response returns. Throughput is a *consequence* of latency — when the system slows, the load generator slows with it. Models a bounded set of clients (e.g., a thread pool).
+
+Open model: requests arrive at a fixed rate independent of how fast responses come back. Models real internet traffic, where new users arrive regardless of current latency.
+
+Coordinated omission is the measurement bug of closed-model testers: when a response is slow, the generator stops sending, so the requests that *would* have queued behind the stall are never issued — and never measured. The tail is silently omitted, making reported p99/p99.9 far too optimistic. wrk2, Vegeta, and k6's arrival-rate executors (constant-arrival-rate / ramping-arrival-rate) drive an open model and correct for it. Prefer the open model for latency SLO validation.
+
 ### What to Measure
 
 - **Throughput at SLO compliance:** how many RPS can be sustained while meeting the SLO?
@@ -840,7 +863,7 @@ A document for every significant incident:
 - Action items (specific, owned, dated)
 ```
 
-**Blameless.** "Engineer X deployed bad code" is not a useful root cause. "Our CI didn't catch this class of bug; we deployed without proper checks" is.
+**Blameless.** "Engineer X deployed bad code" is not a useful root cause. "Our CI (continuous integration) didn't catch this class of bug; we deployed without proper checks" is.
 
 ### Chaos Engineering
 

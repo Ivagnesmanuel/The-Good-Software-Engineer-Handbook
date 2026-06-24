@@ -44,12 +44,12 @@ Plaintext
 Encrypt (key) + MAC (key)
    |
 Ciphertext + Tag  ------------ ->  Ciphertext + Tag
-	                                    |
-	                               Verify MAC (key)
-	                                    |
-	                               Decrypt (key)
-	                                    |
-	                               Plaintext
+                                          |
+                                   Verify MAC (key)
+                                          |
+                                   Decrypt (key)
+                                          |
+                                   Plaintext
 ```
 
 ### Why Cryptography Alone Is Not Enough
@@ -68,7 +68,7 @@ Modern systems combine multiple layers:
 Layer               What it provides                     Example
 -----               --------------------                 -------
 Encryption          Confidentiality                      AES-GCM, ChaCha20-Poly1305
-Authentication      Identity verification                Certificates, mTLS, OAuth2
+Authentication      Identity verification                Certificates, mTLS (mutual TLS), OAuth2
 Key exchange        Shared secret without prior contact  ECDHE (Diffie-Hellman)
 Certificates        Trust bootstrapping                  X.509, PKI, Let's Encrypt
 Identity systems    Who can do what                      IAM, RBAC, ABAC
@@ -83,6 +83,16 @@ A cryptosystem should be secure even if everything about the system, except the 
 - The **key** is the only secret.
 
 This is why AES, SHA-256, and TLS specifications are fully public. Any algorithm that requires secrecy of its design is considered broken by modern standards.
+
+### Randomness Is a Hidden Dependency
+
+Nearly every primitive here silently depends on unpredictable random bytes: secret keys, IVs and nonces, ephemeral DH/ECDHE secrets, and the per-signature value in ECDSA. If that randomness is predictable, the math does not save you — the effective key space collapses.
+
+- Use a **cryptographically secure PRNG (CSPRNG)**, never a general-purpose `rand()` / `Math.random()` / Mersenne Twister. Those are statistically uniform but fully predictable: observing a handful of outputs reveals all future ones.
+- A CSPRNG is seeded from the operating system. On Linux the source is the kernel CSPRNG, exposed via `getrandom(2)` and `/dev/urandom`. Library wrappers: `secrets` (Python), `crypto.randomBytes` (Node), `crypto/rand` (Go), `OsRng` (Rust).
+- The worst breaks came from randomness, not broken ciphers: the 2008 Debian OpenSSL bug reduced the entropy pool to the process ID, making every generated key guessable; reused ECDSA nonces leaked private keys outright (PlayStation 3, early Bitcoin wallets).
+
+> A modern OS CSPRNG does not "run out" of entropy after it is first seeded — `getrandom()` and `/dev/urandom` are safe for all key generation. The old advice to prefer `/dev/random` for long-lived keys is obsolete.
 
 ---
 
@@ -196,7 +206,7 @@ The central problem is **key distribution**: how do two parties agree on a share
 |---|---|---|
 |Unit of encryption|Fixed-size block (e.g., 128 bits)|One byte/bit at a time|
 |State|Stateless per block (mode adds state)|Maintains keystream state|
-|Parallelization|Depends on mode (CTR: yes, CBC: no)|Inherently sequential keystream, but XOR is parallelizable|
+|Parallelization|Depends on mode (CTR: yes, CBC: no)|Counter-based keystreams (ChaCha20) are random-access and parallelizable; older designs (RC4) are strictly sequential|
 |Examples|AES, 3DES (deprecated)|ChaCha20, RC4 (broken)|
 |Primary use|Disk encryption, TLS, file encryption|TLS (ChaCha20), QUIC, mobile|
 
@@ -276,7 +286,7 @@ Ciphertext
 - **MixColumns:** Treats each column as a polynomial over GF(2^8) and multiplies by a fixed matrix. This is the main diffusion step — each output byte depends on all four input bytes in the column.
 - **AddRoundKey:** XORs the state with a round-specific key derived from the master key via the key schedule. Without this, the cipher would be a fixed (and reversible) permutation with no key dependence.
 
-After approximately 4 rounds, a single-bit change in the plaintext affects every bit of the ciphertext (**full diffusion / avalanche effect**).
+After just two rounds, a single-bit change in the input affects every byte of the state (**full diffusion / avalanche effect**), a consequence of the wide-trail design; the remaining rounds exist to provide a large security margin, not to complete diffusion.
 
 **AES-NI (hardware acceleration):**
 
@@ -438,7 +448,7 @@ C3 ---> Decrypt --XOR-- C2 --> P3
 - Identical plaintext blocks produce different ciphertext (good).
 - Encryption is sequential (each block depends on the previous). Cannot be parallelized.
 - Decryption can be parallelized (each block only depends on the corresponding ciphertext and the previous ciphertext).
-- Requires padding (PKCS#7) to fill the last block — this has been a source of **padding oracle attacks** (see `Security Fundamentals.md`).
+- Requires padding (PKCS#7) to fill the last block — this has been a source of **padding oracle attacks**: if the server reveals (via a distinct error or a timing difference) whether decryption produced valid padding, an attacker can decrypt the ciphertext byte-by-byte without ever knowing the key. AEAD modes eliminate this entire class by rejecting any tampered ciphertext before it is processed.
 
 **IV must be unpredictable.** A predictable IV enables chosen-plaintext attacks (BEAST attack on TLS 1.0's CBC).
 
@@ -509,6 +519,8 @@ Nonce|Counter --> AES --> Keystream XOR Plaintext --> Ciphertext
                                                   Authentication Tag
 ```
 
+The `AES(Nonce|0)` block here is the pre-counter block `J0`; the keystream that encrypts the data uses the *incremented* counters `J0+1, J0+2, …`, so the tag and the data keystream never reuse a counter value.
+
 **Parameters:**
 - Key: 128 or 256 bits.
 - Nonce: 96 bits (12 bytes) is standard. Longer nonces are hashed down.
@@ -552,7 +564,7 @@ AEAD construction pairing ChaCha20 (encryption) with Poly1305 (MAC). Designed by
 |Server-side|Default in most TLS stacks|Preferred for mobile clients|
 |Nonce size|96 bits (standard)|96 bits (or 192 with XChaCha20)|
 
-In TLS 1.3, both are mandatory to implement. The server typically selects AES-GCM for desktop/server clients (which have AES-NI) and ChaCha20-Poly1305 for mobile clients.
+In TLS 1.3, only `TLS_AES_128_GCM_SHA256` is mandatory to implement (RFC 8446); AES-256-GCM and ChaCha20-Poly1305 are recommended (SHOULD) and in practice almost universally present. The server typically selects AES-GCM for desktop/server clients (which have AES-NI) and ChaCha20-Poly1305 for mobile clients.
 
 #### AES-GCM-SIV (Nonce Misuse Resistant)
 
@@ -782,14 +794,16 @@ Verification:
 |---|---|---|---|
 |bcrypt|Blowfish-based, adaptive cost|CPU-hard, tunable work factor|Mature, widely used|
 |scrypt|Sequential memory-hard|CPU-hard + memory-hard (resists GPU/ASIC)|Good, used by some systems|
-|Argon2|Winner of PHC (2015)|CPU-hard + memory-hard + parallelism-tunable|Modern standard, recommended|
+|Argon2|Winner of the Password Hashing Competition (PHC, 2015)|CPU-hard + memory-hard + parallelism-tunable|Modern standard, recommended|
+
+**bcrypt truncates the input to 72 bytes** (a limit of its underlying Blowfish key setup): bytes beyond that are ignored, so very long passwords collide and a pepper appended past byte 72 does nothing. Pre-hash (e.g. SHA-256 then base64) before bcrypt if inputs may exceed 72 bytes, or use Argon2/scrypt, which have no such limit.
 
 **Argon2 variants:**
 
 - **Argon2id:** Recommended for password hashing. Combines Argon2i (data-independent, resists side channels) and Argon2d (data-dependent, resists GPU attacks).
 - Typical parameters: 64 MB memory, 3 iterations, 4 parallelism lanes. Tune to take ~0.5-1 second on the target server hardware.
 
-**Pepper:** An additional secret value (not stored in the database) mixed with the password before hashing. If the database is stolen but the pepper (stored in HSM or environment variable) is not, the hashes cannot be attacked offline. Optional but adds defense in depth.
+**Pepper:** An additional secret value (not stored in the database) mixed with the password before hashing. If the database is stolen but the pepper — kept in a hardware security module (HSM) or an environment variable — is not, the hashes cannot be attacked offline. Optional but adds defense in depth.
 
 **Constant-time comparison:** When verifying passwords, always compare the full hash, not byte-by-byte with early exit. A timing side channel in comparison can reveal how many bytes of the hash are correct, enabling a byte-at-a-time attack.
 
@@ -826,18 +840,21 @@ Verification:
 ```
 
 ```
-Signer (has private key)                  Verifier (has public key)
+Signer (has private key)            Verifier (has public key)
 
-Message                                   Message + Signature
-   |                                         |            |
-SHA-256                                   SHA-256      Verify(pub_key)
-   |                                         |            |
-Digest                                    Digest    Recovered digest
-   |                                         |            |
-Sign(priv_key)                            Compare --------+
-   |                                         |
-Signature                                 Valid / Invalid
+Message                             Message            Signature
+   |                                   |                   |
+SHA-256                             SHA-256                |
+   |                                   |                   |
+Digest                              Digest                 |
+   |                                   +--------+----------+
+Sign(priv_key)                                 |
+   |                            Verify(digest, signature, pub_key)
+Signature                                      |
+                                        Valid / Invalid
 ```
+
+Verification is a single check that the signature matches the digest under the public key. Only textbook RSA literally "recovers" a digest from the signature to compare; ECDSA and Ed25519 return valid/invalid directly without recovering anything.
 
 **Why hash first?** RSA and ECDSA can only operate on small inputs. Hashing reduces an arbitrarily large message to a fixed-size digest. Also, signing the hash is much faster than signing the entire message.
 
@@ -847,10 +864,12 @@ Signature                                 Valid / Invalid
 |---|---|---|---|---|
 |RSA-PSS|Integer factoring|3072+ bits key, 3072 bits sig|Slow sign, fast verify|Mature, still used|
 |ECDSA|Elliptic curve (P-256)|256 bits key, 512 bits sig|Fast|Standard (TLS, Bitcoin)|
-|Ed25519|Elliptic curve (Curve25519)|256 bits key, 512 bits sig|Very fast|Modern standard (SSH, Signal)|
-|Ed448|Elliptic curve (Curve448)|448 bits key, 896 bits sig|Fast|Higher security margin|
+|Ed25519|Elliptic curve (Curve25519)|32-byte key (256 bits), 64-byte sig (512 bits)|Very fast|Modern standard (SSH, Signal)|
+|Ed448|Elliptic curve (Curve448)|57-byte key (456 bits), 114-byte sig (912 bits)|Fast|Higher security margin|
 
-> **Ed25519 vs ECDSA:** Ed25519 is deterministic (no random nonce needed during signing, eliminating a class of implementation bugs where bad RNG leaks the private key — this famously broke PlayStation 3's ECDSA). Ed25519 is also faster and has a simpler, safer API. Prefer Ed25519 for new systems.
+Ed25519/Ed448 sizes above are the encoded byte lengths from RFC 8032 (EdDSA).
+
+> **Ed25519 vs ECDSA:** Ed25519 is deterministic (no random nonce needed during signing, eliminating a class of implementation bugs where a repeated or predictable per-signature value (the nonce `k`) leaks the private key — Sony reused one static `k` across signatures, which exposed the PlayStation 3 ECDSA signing key). Ed25519 is also faster and has a simpler, safer API. Prefer Ed25519 for new systems.
 
 ### Public Key Infrastructure (PKI)
 
@@ -878,7 +897,7 @@ Server Certificate (signed by intermediate, contains server's public key)
 Client (browser, TLS library)
 ```
 
-Why intermediate CAs? Root CA private keys are kept offline in HSMs (Hardware Security Modules). If an intermediate CA is compromised, only its certificates are revoked — the root remains trusted.
+Why intermediate CAs? Root CA private keys are kept offline in HSMs. If an intermediate CA is compromised, only its certificates are revoked — the root remains trusted.
 
 #### X.509 Certificate Structure
 
@@ -910,7 +929,7 @@ Certificate:
 **Key fields for engineers:**
 
 - **SAN (Subject Alternative Name):** the domain(s) the cert is valid for. Modern browsers check SAN, not CN. Wildcard: `*.example.com` covers subdomains (one level only).
-- **Validity period:** Let's Encrypt issues 90-day certs (encourages automation). Commercial CAs issue 1-year certs (maximum since 2020).
+- **Validity period:** Let's Encrypt issues 90-day certs (encouraging automation). Maximum allowed certificate lifetimes have been ratcheting downward over time (CA/Browser Forum policy), steadily pushing the whole ecosystem toward automated issuance and renewal.
 - **Key Usage / Extended Key Usage:** constrains what the key can be used for (server auth, client auth, code signing).
 
 #### Certificate Validation (What the Client Checks)
@@ -934,12 +953,12 @@ Certificates need to be invalidated before expiry if the private key is compromi
 |Method|How it works|Pros|Cons|
 |---|---|---|---|
 |CRL (Certificate Revocation List)|CA publishes a list of revoked serial numbers|Simple|Lists grow large, clients must download them|
-|OCSP|Client queries CA's OCSP responder in real-time|Current status|Adds latency, privacy concern (CA sees what you visit)|
+|OCSP (Online Certificate Status Protocol)|Client queries CA's OCSP responder in real-time|Current status|Adds latency, privacy concern (CA sees what you visit)|
 |OCSP Stapling|Server fetches OCSP response and attaches it to TLS handshake|No client-side query, private|Requires server support|
 |CRLite (Firefox)|Compressed CRL distributed via browser updates|Fast, complete|Browser-specific|
 |Short-lived certs|Issue certs valid for hours/days, no revocation needed|Simplest|Requires robust automation (ACME)|
 
-In practice, OCSP stapling is the most common server-side approach. Let's Encrypt's 90-day certs and automated renewal (ACME protocol) reduce the window of exposure, making revocation less critical.
+In practice, OCSP stapling is the most common server-side approach, but the broader trend is away from live revocation checks altogether (some CAs and browsers are phasing OCSP out) toward short-lived certificates: automated renewal (ACME protocol) shrinks the exposure window enough that revocation becomes far less critical.
 
 #### Let's Encrypt and ACME
 
@@ -1098,7 +1117,7 @@ The info/label parameter ensures that even though all keys derive from the same 
 
 ## 9. TLS as a Case Study
 
-TLS (Transport Layer Security) secures the majority of Internet traffic. It combines nearly every primitive discussed so far: key exchange, symmetric encryption, MACs, digital signatures, certificates, and key derivation.
+TLS (Transport Layer Security) secures the majority of Internet traffic. This section uses it as a case study in *composition* — how key exchange, symmetric encryption, MACs, digital signatures, certificates, and key derivation fit together into one protocol — and concentrates the detail where the cryptography lives: the key schedule and the record layer. The transport-level view (round-trip cost, QUIC integration, termination, SNI on the wire) is a networking concern and is developed there.
 
 ### What TLS Provides
 
@@ -1247,7 +1266,7 @@ After the handshake, application data is transmitted in **TLS records**:
 TLS Record:
 +------+--------+--------+---------------------------+------+
 | Type | Legacy | Length |     Encrypted payload     | Tag  |
-| (1B) | (2B)   | (2B)  |     (variable)            |(16B) |
+| (1B) | (2B)   | (2B)   |     (variable)            | (16B)|
 +------+--------+--------+---------------------------+------+
 
 Type:    23 (Application Data) — always 23 in TLS 1.3 (real type inside encrypted payload)

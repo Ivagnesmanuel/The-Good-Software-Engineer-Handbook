@@ -70,7 +70,7 @@ p50  (median):   half of requests are faster than this
 p99:             1 in 100 requests is slower than this
 p99.9:           1 in 1000 -- the tail that dominates user-visible pain at scale
 
-At 100 requests/page, a 1% slow rate means almost every page hits the tail.
+At 100 requests/page, a 1% slow rate (p99) means ~63% of pages hit the tail (1 - 0.99^100); even modest fan-out makes the tail the common case.
 ```
 
 Always report distributions. A single number misrepresents a distribution.
@@ -111,7 +111,7 @@ Start with sampling — it is cheap and shows the hot path without distortion. U
 
 ### Flame Graphs
 
-The single most useful visualization. Width = time spent; stacked by call depth. The widest boxes at the bottom are where to look.
+The single most useful visualization. Each box is a stack frame; width is the fraction of samples it appears in (≈ inclusive time — the x-axis is not wall-clock order). The root is always full width, so the signal is a wide *leaf* or a wide plateau (a frame much wider than its widest child): that is where the CPU actually sits.
 
 ```
             +--------------------------------------------------+
@@ -146,7 +146,7 @@ branch-miss rate:              high rate -> unpredictable branches, consider bra
 
 Microbenchmarks lie more often than they tell the truth:
 
-- **Dead-code elimination:** the compiler deletes work whose result is unused. Consume the result (e.g., XOR into a volatile sink).
+- **Dead-code elimination:** the compiler deletes work whose result is unused. Consume the result (e.g., assign it to a `volatile` sink, as below).
 - **Constant folding:** if inputs are compile-time constants, the compiler precomputes the answer. Use runtime inputs.
 - **Cold caches / warmup:** the first iterations pay for cache and branch-predictor warmup. Discard them.
 - **Unrealistic data:** sorted input, all-same values, or tiny working sets that fit in L1 give numbers never seen in production.
@@ -325,7 +325,7 @@ Branchless is not always faster — it does more work unconditionally. It wins w
 
 ### SIMD / Vectorization
 
-Modern CPUs include **wide registers** — 128 bits in SSE, 256 in AVX2, 512 in AVX-512 — that hold multiple scalar values packed side by side. Each slot is a **lane**. A SIMD (Single Instruction, Multiple Data) instruction operates on all lanes in parallel: one `vaddps` on an AVX2 register performs eight 32-bit float additions in the time a scalar `addss` performs one. The lane count is simply register width divided by element size:
+Modern CPUs include **wide registers** — 128 bits in SSE (NEON on ARM), 256 in AVX2, 512 in AVX-512 — that hold multiple scalar values packed side by side. Each slot is a **lane**. A SIMD (Single Instruction, Multiple Data) instruction operates on all lanes in parallel: one `vaddps` on an AVX2 register performs eight 32-bit float additions in the time a scalar `addss` performs one. The lane count is simply register width divided by element size:
 
 ```
 128-bit SSE / NEON :  4 x float32,  2 x float64,  16 x int8
@@ -333,7 +333,7 @@ Modern CPUs include **wide registers** — 128 bits in SSE, 256 in AVX2, 512 in 
 512-bit AVX-512    : 16 x float32,  8 x float64,  64 x int8
 ```
 
-The speedup is bounded by that lane count (4×–16× for floats), minus the overhead of loading, storing, and any per-lane masking the algorithm needs.
+The speedup is bounded by that lane count (4×–16× for floats), minus the overhead of loading, storing, and any per-lane masking the algorithm needs. On some CPUs the widest instructions (notably AVX-512) also lower the core clock while active, so wider is not always faster — measure rather than assume.
 
 ```c
 // Auto-vectorizable: no loop-carried dependencies, contiguous access,
@@ -435,21 +435,7 @@ arena_reset(&a);                  // reuse the same 1 MB for the next batch
 arena_destroy(&a);                // when the arena itself is done
 ```
 
-**Walking through it.** The arena is a contiguous block of memory plus a cursor:
-
-- `base` — pointer to the start of the block.
-- `size` — total bytes in the block.
-- `offset` — how many bytes have already been handed out; the next allocation begins at `base + offset`.
-
-**The real allocation happens exactly once, in `arena_init`** — a single `malloc(size)` obtains the whole block from the OS. After that, no allocator-level memory acquisition occurs. `arena_alloc` does *not* allocate; it carves a slice out of the block already in hand. That is the entire performance argument: the cost of `malloc` is paid one time and amortized across every subsequent `arena_alloc` call.
-
-`arena_alloc` does three things:
-
-1. **Round the request size up to a 16-byte multiple.** The expression `(n + 15) & ~(size_t)15` clears the low 4 bits of `n + 15`, which is exactly "round up to the next multiple of 16." Adding 15 *first* is what turns this into rounding *up* rather than down (`n & ~15` alone would round down). The rounding ensures every allocation — and therefore the cursor position after it — remains 16-byte aligned, which SIMD loads require and ordinary access prefers.
-2. **Check there is room.** If the rounded request would push `offset` past `size`, refuse the allocation.
-3. **Return the cursor and advance it.** `base + offset` is the address of the new allocation; `offset += n` moves the cursor past it. The entire allocation is one comparison and one addition — no free list, no metadata, no syscall.
-
-`arena_reset` is the payoff: setting `offset` back to 0 marks the whole block as available again, in a single store. No per-object bookkeeping runs because none exists. The program contract is simply that no pointer into the arena is dereferenced after a reset.
+**Walking through it.** The only real allocation is the single `malloc` in `arena_init`; `arena_alloc` carves slices out of that block, so the cost of `malloc` is paid once and amortized across every allocation. The one non-obvious line is the rounding: `(n + 15) & ~(size_t)15` clears the low 4 bits of `n + 15`, rounding the request *up* to the next multiple of 16 (adding 15 *first* is what makes it round up rather than down — `n & ~15` alone rounds down). That keeps every allocation, and the cursor after it, 16-byte aligned, which SIMD loads require and ordinary access prefers; it works because `malloc` already returns memory aligned for any type (`max_align_t`, typically 16 bytes). `arena_reset` then marks the whole block reusable in a single store, with the sole contract that no pointer into the arena is dereferenced afterward.
 
 Ideal for per-request, per-frame, or per-parse lifetimes: reset the arena at the end and all those allocations vanish for free.
 
@@ -458,8 +444,8 @@ Ideal for per-request, per-frame, or per-parse lifetimes: reset the arena at the
 Misaligned data can cost extra loads or, on some architectures, fault. Align hot data to cache-line boundaries to avoid straddling two lines, and to prevent false sharing between cores (see `Concurrency.md`).
 
 ```c
-_Alignas(64) struct HotCounters {   // own cache line, no false sharing
-    atomic_long requests;
+struct HotCounters {                  // aligned to its own cache line
+    _Alignas(64) atomic_long requests;
     atomic_long errors;
 };
 ```
@@ -468,13 +454,30 @@ _Alignas(64) struct HotCounters {   // own cache line, no false sharing
 
 On a multicore machine, all cores share memory bandwidth. A workload that is fine single-threaded can saturate the memory bus when run on every core, so it stops scaling. If adding cores stops helping, suspect bandwidth, not locks.
 
+### Roofline: Compute-Bound or Memory-Bound
+
+Attainable performance is bounded by the lesser of two ceilings: peak compute (FLOP/s — floating-point operations per second) and peak memory bandwidth multiplied by arithmetic intensity, where arithmetic intensity is the number of operations performed per byte moved from memory.
+
+```
+attainable FLOP/s = min( peak_compute,  bandwidth * arithmetic_intensity )
+
+ FLOP/s |          ____________  peak compute (flat roof)
+        |         /
+        |        /  <- bandwidth-bound      compute-bound ->
+        |       /     (sloped roof)
+        +------/--------------------------- arithmetic intensity (FLOP/byte)
+```
+
+Low-intensity kernels (a single operation per loaded element — vector add, SAXPY) are bandwidth-bound, and faster arithmetic does not help. High-intensity kernels (dense matrix multiply, which reuses each loaded byte across many operations) are compute-bound. The lever differs by regime: bandwidth-bound code is fixed by moving fewer bytes (better layout, cache blocking, smaller types); compute-bound code by SIMD and instruction-level parallelism.
+
 ### Language Note: Manual vs GC vs Ownership
 
 C's `malloc`/`free` is *manual* — full control, full responsibility (leaks, use-after-free, double-free). The other languages move the cost somewhere else:
 
 ```
 C:       manual malloc/free. Control + bugs are yours.
-C++:     RAII + smart pointers (unique_ptr, shared_ptr). Deterministic destruction;
+C++:     RAII (Resource Acquisition Is Initialization) + smart pointers (unique_ptr,
+         shared_ptr). Deterministic destruction;
          shared_ptr adds atomic refcount traffic. Still no GC pauses.
 Rust:    ownership + borrow checker. Deterministic free at scope end, no GC, and the
          compiler proves there's no use-after-free -- the safety of GC without the pauses.
@@ -500,7 +503,7 @@ No amount of micro-optimization saves a quadratic algorithm on large input. Algo
 n = 1,000,000:
   O(n)        ->  1,000,000 ops          (instant)
   O(n log n)  ->  ~20,000,000 ops        (fine)
-  O(n^2)      ->  1,000,000,000,000 ops  (hours)
+  O(n^2)      ->  1,000,000,000,000 ops  (many minutes to hours)
 ```
 
 Before optimizing constants, confirm the complexity class is acceptable for the real input size. Swapping an O(n^2) scan for a hash lookup (O(n)) is worth more than any cache trick.
@@ -556,7 +559,7 @@ On every storage medium, sequential access vastly outperforms random access — 
 Every copy between buffers costs bandwidth and cache. Kernel facilities move data without bouncing it through user space:
 
 ```
-Traditional: disk -> kernel buffer -> user buffer -> kernel socket buffer -> NIC
+Traditional: disk -> kernel buffer -> user buffer -> kernel socket buffer -> NIC (network interface card)
              (two extra copies, two extra crossings)
 
 sendfile():  disk -> kernel buffer -> NIC
@@ -584,7 +587,7 @@ The serial fraction caps parallel speedup. If 5% of the work is inherently seria
 
 ### Contention Kills Scaling
 
-A lock that every thread needs serializes them — N cores are present but used one at a time. Symptoms: throughput flat or falling as cores are added; high time in lock/futex.
+A lock that every thread needs serializes them — N cores are present but used one at a time. Symptoms: throughput flat or falling as cores are added; high time in lock/futex (fast userspace mutex).
 
 ```
 Fixes, in order of preference:
@@ -600,7 +603,7 @@ Two threads writing different variables that share a cache line ping-pong the li
 
 ```c
 // Per-thread counters, each on its own cache line.
-struct _Alignas(64) ThreadCounter { atomic_long value; };
+struct ThreadCounter { _Alignas(64) atomic_long value; };  // alignof == sizeof == 64
 struct ThreadCounter counters[NUM_THREADS];
 ```
 
@@ -612,7 +615,7 @@ I/O-bound work:   threads >> cores, or use async to avoid threads entirely.
 Mixed:            separate pools, or async with a CPU offload pool.
 ```
 
-Oversubscribing CPU-bound work hurts: context switches pollute caches and the TLB (see `Operating Systems.md`).
+Oversubscribing CPU-bound work hurts: context switches pollute caches and the TLB (Translation Lookaside Buffer; see `Operating Systems.md`).
 
 ---
 
@@ -625,7 +628,7 @@ The compiler is the cheapest optimizer available. Let it work before hand-optimi
 ```
 -O0   no optimization; fast compiles, for debugging
 -O1   basic optimizations
--O2   the production default: inlining, vectorization, most optimizations, safe
+-O2   the production default: inlining, most optimizations, safe
 -O3   aggressive: more inlining/vectorization; can bloat code, occasionally slower
 -Os   optimize for size (smaller code can mean fewer instruction-cache misses)
 -Ofast  -O3 plus -ffast-math: breaks strict IEEE float; use only if that is acceptable
@@ -671,7 +674,7 @@ AOT compiled (C, C++, Rust, Go):
     Native code before running. No warmup. Optimizer sees code, not behavior
     (PGO feeds behavior back in). Predictable steady-state performance.
 
-JIT compiled (Java/JVM, C#/.NET, JavaScript/V8, PyPy):
+JIT (just-in-time) compiled (Java/JVM, C#/.NET, JavaScript/V8, PyPy):
     Starts interpreting, then compiles hot methods at runtime using *observed* behavior
     (actual branch frequencies, actual types, inlining across virtual calls).
     Can in principle beat AOT on hot loops -- but pays a WARMUP cost: early requests are
@@ -685,7 +688,7 @@ Interpreted (CPython, Ruby MRI):
     means "do less in Python and more in C."
 ```
 
-Practical consequences: AOT languages have no warmup but need PGO to exploit runtime behavior; JIT languages self-tune but need warmup before a benchmark can be trusted (and their tail latency includes compilation pauses); interpreted languages optimize by pushing hot work into native code. LTO and PGO as described above are AOT concepts; the JIT does the equivalent online, automatically.
+Practical consequences for measurement: a JIT must warm up before a benchmark can be trusted, and its tail latency includes compilation pauses. The LTO and PGO discussed above are AOT concepts; a JIT does the equivalent online and automatically.
 
 ---
 
@@ -695,7 +698,7 @@ Beyond the program, the OS and hardware configuration affect performance.
 
 ### NUMA
 
-On multi-socket systems, memory is attached to specific sockets. Accessing a remote socket's memory is slower than local. The fix is locality: keep a thread's data on the node where the thread runs.
+On multi-socket systems, memory is attached to specific sockets (NUMA — Non-Uniform Memory Access). Accessing a remote socket's memory is slower than local. The fix is locality: keep a thread's data on the node where the thread runs.
 
 ```
 Socket 0           Socket 1
@@ -712,7 +715,7 @@ The default 4 KB page means a large working set needs many TLB entries; TLB miss
 
 ### CPU Affinity and Isolation
 
-Pinning threads to cores (`taskset`, `pthread_setaffinity_np`) keeps caches warm and avoids migration. For latency-critical work, isolating cores (`isolcpus`) keeps the scheduler and other tasks off them. This is the same toolkit real-time systems use (see `Real-Time Systems.md`).
+Pinning threads to cores (`taskset`, `pthread_setaffinity_np`) keeps caches warm and avoids migration. For latency-critical work, isolating cores (`isolcpus`) keeps the scheduler and other tasks off them — the same toolkit hard-real-time systems use to bound scheduling jitter.
 
 ### Frequency Scaling
 
@@ -740,15 +743,15 @@ Throughput optimization and latency optimization diverge. At scale, the *tail* (
 Little's Law: `L = lambda * W` (items in system = arrival rate x time in system). As utilization approaches 100%, queue length — and thus latency — explodes nonlinearly.
 
 ```
-Average wait time grows roughly as  1 / (1 - utilization):
+Mean queueing delay grows as  rho / (1 - rho)   (rho = utilization, M/M/1 model):
 
-  utilization 50%  ->  baseline
-  utilization 80%  ->  ~5x the queueing delay
+  utilization 50%  ->  baseline (~1x)
+  utilization 80%  ->  ~4x
   utilization 95%  ->  ~20x
   utilization 99%  ->  ~100x
 ```
 
-This is why high-throughput systems deliberately run below saturation. The last 10% of capacity costs enormous latency. Headroom is not waste — it is the tail-latency budget.
+This is why high-throughput systems deliberately run below saturation (the M/M/1 curve is idealized, but the cliff near 100% utilization is universal). The last 10% of capacity costs enormous latency. Headroom is not waste — it is the tail-latency budget.
 
 ### Techniques for the Tail
 
@@ -758,7 +761,7 @@ This is why high-throughput systems deliberately run below saturation. The last 
 - **Separate latency-critical from batch work.** Don't let background compaction share the core with request handling.
 - **Avoid stop-the-world pauses.** In managed runtimes, tune or choose a low-pause GC; in C, control allocation so it never stalls (arenas, pools).
 
-For *measuring* the tail in production (percentile/histogram metrics, latency heatmaps, the fan-out math that explains why p99 matters) and for validating capacity under load, see `Observability.md`.
+For *measuring* the tail in production (percentile/histogram metrics, latency heatmaps) and validating capacity under load, see `Observability.md`. Fan-out amplification and hedging as a design pattern are treated at the system-design altitude in `System Design.md`.
 
 ---
 

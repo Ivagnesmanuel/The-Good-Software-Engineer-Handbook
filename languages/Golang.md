@@ -296,6 +296,10 @@ fmt.Println(a == b) // true
 // Structs are copied by value (no references, independent copies)
 c := a
 c.Name = "Bob" // a.Name is still "Alice"
+
+// Do NOT copy a struct after first use if it contains a sync.Mutex, sync.WaitGroup,
+// or sync/atomic type: the copy gets an independent, unsynchronized lock.
+// Pass such structs by pointer. `go vet` flags this (copylocks).
 ```
 
 ---
@@ -323,8 +327,14 @@ func (r *Rectangle) Scale(factor float64) {
 }
 
 r := Rectangle{Width: 10, Height: 5}
-a := r.Area()   // value or pointer can call value receiver methods
-r.Scale(2.0)    // value or pointer can call pointer receiver methods
+a := r.Area()   // value receiver: callable on both T and *T
+r.Scale(2.0)    // pointer receiver: callable here only because r is addressable
+
+// Method sets (govern interface satisfaction):
+//   type T   -> value-receiver methods only
+//   type *T  -> value- AND pointer-receiver methods
+// A value of T in an interface does NOT satisfy an interface that requires
+// a pointer-receiver method -- store &T instead.
 ```
 
 ### Interfaces
@@ -425,6 +435,17 @@ func findUser(id int) (*User, error) {
 }
 ```
 
+```go
+// Typed nil in an interface is NOT nil.
+// An interface value is (type, value); it equals nil only when BOTH are nil.
+func find() error {
+    var e *NotFoundError // nil pointer
+    return e             // returns a non-nil error: (type=*NotFoundError, value=nil)
+}
+if find() != nil { /* TRUE -- surprises callers */ }
+// Fix: return a literal nil on the no-error path; never return a typed nil pointer as error.
+```
+
 ### errors.Is and errors.As (Go 1.13+)
 
 ```go
@@ -484,7 +505,7 @@ var p *int    // p == nil
 - Pointer receivers: when methods need to modify the receiver, or to avoid copying large structs.
 - Shared state: when multiple parts of the code need to observe mutations.
 - Optional values: `*T` can be `nil`, signaling "no value" (e.g., optional JSON fields).
-- Slices, maps, channels, and functions are already reference types -- no need to pass pointers to them.
+- Maps, channels, and functions are reference types -- no need to pass pointers to them. Slices are *almost* one: the slice header (pointer, len, cap) is copied by value, so a callee can mutate existing elements but its `append`/reslice growth is invisible to the caller -- return the slice, or pass `*[]T`, when the length may change.
 
 ---
 
@@ -523,6 +544,12 @@ sub := s[:]     // full copy of the slice header
 // Full slice expression (low:high:max, limits capacity)
 sub := s[1:4:4] // len=3, cap=3 (append won't overwrite s)
 
+// Aliasing: a sub-slice shares the backing array until a grow reallocates.
+a := []int{1, 2, 3, 4}
+b := a[:2]
+b = append(b, 99) // overwrites a[2]: a is now [1 2 99 4]
+// Force a private array with a full slice expression: b := a[:2:2]
+
 // Length and capacity
 len(s)  // number of elements
 cap(s)  // capacity of the backing array
@@ -531,10 +558,12 @@ cap(s)  // capacity of the backing array
 dst := make([]int, len(src))
 copy(dst, src) // returns number of elements copied
 
-// Delete element at index i (preserving order)
+// Delete element at index i (preserving order).
+// Leaves a stale reference in the vacated tail slot -- a leak if elements hold pointers.
 s = append(s[:i], s[i+1:]...)
 
-// Delete element at index i (Go 1.21+ slices package)
+// Delete element at index i (Go 1.21+ slices package).
+// Preferred: it zeroes the vacated tail, so removed elements can be garbage-collected.
 import "slices"
 s = slices.Delete(s, i, i+1)
 
@@ -548,10 +577,13 @@ s := make([]int, 0) // non-nil, len=0, cap=0
 ### slices Package (Go 1.21+)
 
 ```go
-import "slices"
+import (
+    "cmp"
+    "slices"
+)
 
 slices.Sort(s)
-slices.SortFunc(s, func(a, b int) int { return a - b })
+slices.SortFunc(s, func(a, b int) int { return cmp.Compare(a, b) })
 slices.Contains(s, 42)
 slices.Index(s, 42)       // -1 if not found
 slices.Equal(a, b)
@@ -592,6 +624,10 @@ len(m)
 var m map[string]int // nil
 _ = m["key"]         // ok, returns 0
 // m["key"] = 1      // panic!
+
+// Plain maps are NOT safe for concurrent access. A concurrent write
+// (with another read or write) is a fatal runtime error -- not a recoverable
+// panic. Guard with sync.Mutex/RWMutex or use sync.Map. See `Concurrency.md`.
 ```
 
 ### maps Package (Go 1.21+)
@@ -740,7 +776,7 @@ func NewPair[T, U any](first T, second U) Pair[T, U] {
 ### Type Constraints
 
 ```go
-import "golang.org/x/exp/constraints" // or "cmp" in Go 1.21+
+import "golang.org/x/exp/constraints" // since Go 1.21, cmp.Ordered (std "cmp") replaces constraints.Ordered
 
 // Built-in constraints
 // any          -- alias for interface{}, allows any type
@@ -789,6 +825,8 @@ cmp.Or(a, b, c)          // returns first non-zero value (Go 1.22+)
 
 ## Concurrency
 
+For the underlying model — happens-before, the Go memory model, the M:N scheduler, deadlock conditions, and the race detector — see `Concurrency.md`.
+
 ### Goroutines
 
 Goroutines are lightweight, multiplexed onto OS threads by the Go runtime.
@@ -802,7 +840,8 @@ go func() {
     fmt.Println("running concurrently")
 }()
 
-// With arguments (capture by value to avoid race)
+// Passing the loop value as an argument (explicit; also safe to capture directly,
+// since each iteration now has its own copy of the loop variable)
 for i := 0; i < 5; i++ {
     go func(n int) {
         fmt.Println(n)
@@ -894,7 +933,7 @@ var counter atomic.Int64
 counter.Add(1)
 counter.Store(0)
 v := counter.Load()
-swapped := counter.CompareAndSwap(old, new)
+swapped := counter.CompareAndSwap(oldVal, newVal)
 ```
 
 ---
@@ -917,6 +956,13 @@ v, ok := <-ch // ok is false if channel is closed and drained
 
 // Close (only sender should close, signals no more values)
 close(ch)
+
+// Channel runtime rules:
+//   close(closedCh) -> panic: close of closed channel
+//   close(nilCh)    -> panic: close of nil channel
+//   ch <- v         -> panic if ch is already closed
+//   <-closedCh      -> no block: zero value immediately (ok == false)
+//   <-nilCh         -> blocks forever (a nil channel disables a select case)
 
 // Range over channel (reads until closed)
 for msg := range ch {
@@ -1107,7 +1153,7 @@ result := func(x int) int {
 
 ### Defer
 
-Deferred calls execute in LIFO order when the enclosing function returns.
+Deferred calls execute in LIFO (last-in, first-out) order when the enclosing function returns.
 
 ```go
 func readFile(path string) ([]byte, error) {
@@ -1124,6 +1170,10 @@ func readFile(path string) ([]byte, error) {
 for i := 0; i < 3; i++ {
     defer fmt.Println(i) // prints 2, 1, 0
 }
+
+// Defers run at function return, not at end of loop iteration:
+//   for _, p := range paths { f, _ := os.Open(p); defer f.Close() } // leaks until return
+// Move the body into a helper func (or Close explicitly) to release per iteration.
 
 // Common: defer with named return values for error annotation
 func doWork() (err error) {
@@ -1670,7 +1720,7 @@ GOOS=darwin GOARCH=arm64 go build -o myapp
 
 # Embed version info
 go build -ldflags="-X main.version=1.2.3 -s -w" -o myapp
-# -s: strip symbol table, -w: strip DWARF, reduces binary size
+# -s: strip symbol table, -w: strip DWARF (the debug-info format), reduces binary size
 
 # Static binary (no cgo)
 CGO_ENABLED=0 go build -o myapp
@@ -1802,20 +1852,11 @@ goSlice := C.GoBytes(unsafe.Pointer(cData), C.int(length))
 #cgo pkg-config: libpng
 #cgo linux LDFLAGS: -lrt
 #cgo darwin LDFLAGS: -framework CoreFoundation
+#cgo darwin,amd64 CFLAGS: -DDARWIN_AMD64   // constraints combine as OS[,arch]
 
 #include <sqlite3.h>
 */
 import "C"
-```
-
-### CGo Compiler and Linker Directives
-
-```go
-// Platform-specific flags
-// #cgo CFLAGS: -DDEBUG -Wall
-// #cgo LDFLAGS: -L/usr/local/lib -lmylib
-// #cgo linux CFLAGS: -DLINUX
-// #cgo darwin,amd64 CFLAGS: -DDARWIN_AMD64
 ```
 
 ### Calling Go from C (Export)
@@ -1859,7 +1900,7 @@ func main() {
 ### CGo Caveats
 
 - **Performance**: each Go-to-C call has overhead (~100-200ns). Avoid fine-grained calls in hot loops.
-- **Memory**: C memory (`C.malloc`, `C.CString`) is invisible to Go's GC. Always `C.free` manually.
+- **Memory**: C memory (`C.malloc`, `C.CString`) is invisible to Go's GC (garbage collector). Always `C.free` manually.
 - **Pointer passing**: Go pointers passed to C must not be retained by C after the call returns. Go enforces this at runtime (`cgocheck`).
 - **Cross-compilation**: CGo requires a C compiler for the target platform. `CGO_ENABLED=0` disables CGo entirely for pure-Go static builds.
 - **Build time**: CGo packages compile slower than pure Go.
